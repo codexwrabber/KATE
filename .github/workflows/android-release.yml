@@ -35,6 +35,9 @@ jobs:
             
       - name: Grant execute permission
         run: chmod +x gradlew
+        
+      - name: Clean build
+        run: ./gradlew clean
 
       - name: Build & sign release APK
         env:
@@ -43,7 +46,7 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleRelease
-
+        
       - name: Verify native library architecture
         run: |
           APK=app/build/outputs/apk/release/*.apk
