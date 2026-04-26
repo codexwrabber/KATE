@@ -13,8 +13,8 @@ android {
         applicationId   = "com.kate.assistant"
         minSdk          = 26
         targetSdk       = 34
-        versionCode     = 5
-        versionName     = "1.0.4"
+        versionCode     = 6
+        versionName     = "1.0.5"
         multiDexEnabled = true
 
         externalNativeBuild {
@@ -26,7 +26,6 @@ android {
                 )
             }
         }
-        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     externalNativeBuild {
@@ -36,14 +35,14 @@ android {
         }
     }
 
-splits {
-    abi {
-        isEnable = true
-        reset()
-        include("arm64-v8a")
-        isUniversalApk = false
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a")
+            isUniversalApk = false
+        }
     }
-}
 
     signingConfigs {
         create("release") {
