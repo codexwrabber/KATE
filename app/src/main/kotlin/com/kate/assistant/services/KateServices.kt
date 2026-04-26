@@ -56,22 +56,18 @@ class KateService : Service() {
         db                = KateDatabase.getDatabase(this)
         habitDao          = db.habitDao()
 
-        speechManager = KateSpeechManager(this) { text -> bridge.processText(text) }
-
-        bridge.updateAppList(loadInstalledApps())
-
-        scope.launch {
-            val formatted = habitDao.getAll()
-                .map { "${it.intent}|${it.entity}|${it.count}" }.toTypedArray()
-            bridge.loadHabits(formatted)
+        speechManager = KateSpeechManager(this) { text ->
+    android.util.Log.d("Kate", "Speech result: $text")
+    // Show what was heard
+    KateEventBus.emit(KateEvent.Error("Heard: $text"))
+    // Process the command
+    bridge.processText(text)
+    // Re-listen automatically
+    scope.launch(Dispatchers.Main) {
+        kotlinx.coroutines.delay(500)
+        speechManager.startListening()
+    }
         }
-
-        KateEventBus.subscribe { event ->
-            when (event) {
-                is KateEvent.WakeWordDetected -> {
-                    Log.d("Kate", "Wake word!")
-                    speechManager.startListening()
-                }
                 is KateEvent.IntentEvent  -> handleIntent(event)
                 is KateEvent.HabitUpdate  -> persistHabit(event)
                 is KateEvent.Suggestion   -> {
