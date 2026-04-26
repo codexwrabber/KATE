@@ -54,7 +54,7 @@
     <application
         android:name=".KateApp"
         android:allowBackup="false"
-        android:extractNativeLibs="true"
+        android:extractNativeLibs="false"
         android:hardwareAccelerated="false"
         android:largeHeap="false"
         android:icon="@drawable/ic_kate"
