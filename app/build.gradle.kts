@@ -13,34 +13,23 @@ android {
         applicationId   = "com.kate.assistant"
         minSdk          = 26
         targetSdk       = 34
-        versionCode     = 6
-        versionName     = "1.0.5"
+        versionCode     = 7
+        versionName     = "1.0.6"
         multiDexEnabled = true
 
         externalNativeBuild {
             cmake {
                 cppFlags("")
-                arguments(
-                    "-DANDROID_PLATFORM=android-26",
-                    "-DANDROID_ARM_NEON=TRUE"
-                )
+                arguments("-DANDROID_PLATFORM=android-26")
             }
         }
+        ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a") }
     }
 
     externalNativeBuild {
         cmake {
             path    = file("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
-        }
-    }
-
-    splits {
-        abi {
-            isEnable = true
-            reset()
-            include("arm64-v8a")
-            isUniversalApk = false
         }
     }
 
