@@ -33,7 +33,12 @@ class KateSpeechManager(
         try {
             Log.d("KateSpeech", "Creating recognizer...")
             recognizer?.destroy()
-            recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+            // SpeechRecognizer MUST be created on main thread
+if (Looper.myLooper() != Looper.getMainLooper()) {
+    Log.e("KateSpeech", "NOT on main thread — this will fail!")
+    return
+}
+recognizer = SpeechRecognizer.createSpeechRecognizer(context)
 
             if (!SpeechRecognizer.isRecognitionAvailable(context)) {
                 Log.e("KateSpeech", "Speech recognition NOT available on this device!")
