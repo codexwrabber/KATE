@@ -26,11 +26,11 @@ target_link_libraries(kate_core
 target_include_directories(kate_core PRIVATE ${CMAKE_SOURCE_DIR})
 
 target_compile_options(kate_core PRIVATE
-    -O0
+    -O2
     -fPIC
+    -Wall
 )
 
 target_link_options(kate_core PRIVATE
     -Wl,-z,max-page-size=16384
-    -Wl,--build-id=sha1
 )
