@@ -97,7 +97,9 @@ scope.launch(Dispatchers.Main) {
     } catch (e: Exception) {
         android.util.Log.e("KateService", "Listen error: ${e.message}")
     }
+  }
 }
+    
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
     override fun onDestroy() { bridge.stopAudio(); scope.cancel(); super.onDestroy() }
     override fun onBind(intent: Intent?): IBinder? = null
