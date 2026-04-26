@@ -87,15 +87,17 @@ class KateService : Service() {
         }
 
         bridge.startAudio()
-        // Temporary — auto-trigger listening without wake word
-scope.launch {
-    kotlinx.coroutines.delay(2000)
-    speechManager.startListening()
-    tts.speak("Kate is ready. Speak your command.")
-    
+        // Auto-trigger listening for testing
+scope.launch(Dispatchers.Main) {
+    try {
+        kotlinx.coroutines.delay(3000)
+        tts.speak("Kate is ready. Speak your command.")
+        kotlinx.coroutines.delay(2000)
+        speechManager.startListening()
+    } catch (e: Exception) {
+        android.util.Log.e("KateService", "Listen error: ${e.message}")
     }
 }
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
     override fun onDestroy() { bridge.stopAudio(); scope.cancel(); super.onDestroy() }
     override fun onBind(intent: Intent?): IBinder? = null
