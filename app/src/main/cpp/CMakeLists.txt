@@ -25,6 +25,11 @@ target_link_libraries(kate_core
 
 target_include_directories(kate_core PRIVATE ${CMAKE_SOURCE_DIR})
 
+# Modern toolchain flags for Android 14 Go compatibility
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
+set(CMAKE_SHARED_LINKER_FLAGS 
+    "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--hash-style=both")
+
 target_compile_options(kate_core PRIVATE
     -O2
     -fPIC
@@ -32,5 +37,6 @@ target_compile_options(kate_core PRIVATE
 )
 
 target_link_options(kate_core PRIVATE
+    -Wl,--hash-style=both
     -Wl,-z,max-page-size=16384
 )
