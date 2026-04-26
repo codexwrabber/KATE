@@ -17,8 +17,10 @@ add_library(kate_core SHARED
 )
 
 find_library(log-lib log)
+find_library(aaudio-lib aaudio)
 
 target_link_libraries(kate_core
+    ${aaudio-lib}
     ${log-lib}
     m
 )
