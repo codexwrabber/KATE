@@ -153,18 +153,13 @@ class KateService : Service() {
 
             bridge.startAudio()
 
-            // Auto-trigger listening — bypasses wake word for testing
-            scope.launch(Dispatchers.Main) {
-                try {
-                    delay(3000)
-                    tts.speak("Kate is ready. Speak your command.")
-                    delay(2000)
-                    speechManager.startListening()
-                } catch (e: Exception) {
-                    Log.e("KateService", "Auto-listen error: ${e.message}")
-                }
-            }
-
+// Auto-trigger on main thread — SpeechRecognizer requires main looper
+Handler(Looper.getMainLooper()).postDelayed({
+    tts.speak("Kate is ready. Speak your command.")
+    Handler(Looper.getMainLooper()).postDelayed({
+        speechManager.startListening()
+    }, 2000)
+}, 3000)
         } catch (e: Exception) {
             Log.e("KateService", "Startup error: ${e.message}")
         }
