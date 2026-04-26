@@ -87,6 +87,12 @@ class KateService : Service() {
         }
 
         bridge.startAudio()
+        // Temporary — auto-trigger listening without wake word
+scope.launch {
+    kotlinx.coroutines.delay(2000)
+    speechManager.startListening()
+    tts.speak("Kate is ready. Speak your command.")
+    
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
