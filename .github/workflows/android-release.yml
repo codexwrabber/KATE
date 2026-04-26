@@ -22,13 +22,16 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Decode keystore
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
         run: |
-          echo "${{ secrets.SIGNING_KEY }}" | tr -d ' \n\r' | base64 -d > $GITHUB_WORKSPACE/kate.jks
-          echo "Keystore size: $(wc -c < $GITHUB_WORKSPACE/kate.jks) bytes"
-          keytool -list -keystore $GITHUB_WORKSPACE/kate.jks \
-            -storepass ${{ secrets.KEY_STORE_PASSWORD }} \
+          printf '%s' "$SIGNING_KEY" | base64 -d > $GITHUB_WORKSPACE/kate.jks
+          echo "JKS size: $(wc -c < $GITHUB_WORKSPACE/kate.jks) bytes"
+          keytool -list \
+            -keystore $GITHUB_WORKSPACE/kate.jks \
             -storetype JKS \
-            -noprompt && echo "Keystore valid!" || echo "Keystore INVALID!"
+            -storepass ${{ secrets.KEY_STORE_PASSWORD }} \
+            -noprompt
             
       - name: Grant execute permission
         run: chmod +x gradlew
