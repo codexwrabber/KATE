@@ -21,38 +21,83 @@ class KateSpeechManager(
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
         }
 
     fun startListening() {
-        if (isListening) return
+        if (isListening) {
+            Log.d("KateSpeech", "Already listening — skipping")
+            return
+        }
         try {
+            Log.d("KateSpeech", "Creating recognizer...")
             recognizer?.destroy()
             recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+
+            if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+                Log.e("KateSpeech", "Speech recognition NOT available on this device!")
+                return
+            }
+
             recognizer?.setRecognitionListener(object : RecognitionListener {
-                override fun onResults(results: Bundle) {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    isListening = true
+                    Log.d("KateSpeech", "✅ Ready for speech — speak now!")
+                }
+                override fun onBeginningOfSpeech() {
+                    Log.d("KateSpeech", "🎤 Speech detected!")
+                }
+                override fun onRmsChanged(rmsdB: Float) {
+                    // Log.v("KateSpeech", "RMS: $rmsdB") // uncomment if needed
+                }
+                override fun onBufferReceived(buffer: ByteArray?) {
+                    Log.d("KateSpeech", "Buffer received")
+                }
+                override fun onEndOfSpeech() {
+                    Log.d("KateSpeech", "🔇 End of speech")
                     isListening = false
-                    val text = results
-                        .getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        ?.firstOrNull() ?: return
-                    Log.d("KateSpeech", "Heard: $text")
-                    onResult(text)
                 }
                 override fun onError(error: Int) {
                     isListening = false
-                    Log.e("KateSpeech", "Error: $error")
+                    val msg = when (error) {
+                        SpeechRecognizer.ERROR_AUDIO              -> "Audio error"
+                        SpeechRecognizer.ERROR_CLIENT             -> "Client error"
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "No permission!"
+                        SpeechRecognizer.ERROR_NETWORK            -> "Network error"
+                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT    -> "Network timeout"
+                        SpeechRecognizer.ERROR_NO_MATCH           -> "No match found"
+                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY    -> "Recognizer busy"
+                        SpeechRecognizer.ERROR_SERVER             -> "Server error"
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT     -> "Speech timeout"
+                        else                                      -> "Unknown error $error"
+                    }
+                    Log.e("KateSpeech", "❌ Error: $msg")
                 }
-                override fun onReadyForSpeech(params: Bundle?)  { isListening = true }
-                override fun onBeginningOfSpeech()              {}
-                override fun onRmsChanged(rmsdB: Float)         {}
-                override fun onBufferReceived(buffer: ByteArray?){}
-                override fun onEndOfSpeech()                    {}
-                override fun onPartialResults(partial: Bundle?) {}
-                override fun onEvent(type: Int, params: Bundle?){}
+                override fun onResults(results: Bundle) {
+                    isListening = false
+                    val matches = results
+                        .getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    Log.d("KateSpeech", "✅ Results: $matches")
+                    val text = matches?.firstOrNull() ?: return
+                    onResult(text)
+                }
+                override fun onPartialResults(partial: Bundle?) {
+                    val text = partial
+                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?.firstOrNull()
+                    Log.d("KateSpeech", "Partial: $text")
+                }
+                override fun onEvent(type: Int, params: Bundle?) {
+                    Log.d("KateSpeech", "Event: $type")
+                }
             })
+
+            Log.d("KateSpeech", "Starting listening...")
             recognizer?.startListening(buildIntent())
-            Log.d("KateSpeech", "Listening started")
+
         } catch (e: Exception) {
-            Log.e("KateSpeech", "Failed to start: ${e.message}")
+            Log.e("KateSpeech", "Exception: ${e.message}")
             isListening = false
         }
     }
@@ -61,10 +106,11 @@ class KateSpeechManager(
         try {
             recognizer?.stopListening()
             recognizer?.destroy()
-            recognizer = null
+            recognizer  = null
             isListening = false
+            Log.d("KateSpeech", "Stopped listening")
         } catch (e: Exception) {
-            Log.e("KateSpeech", "Failed to stop: ${e.message}")
+            Log.e("KateSpeech", "Stop error: ${e.message}")
         }
     }
 
