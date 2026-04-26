@@ -44,68 +44,99 @@ class KateService : Service() {
         super.onCreate()
         startForegroundServiceSafe()
 
-        bridge            = KateBridge(this)
-        tts               = KateTts(this)
-        deviceController  = KateDeviceController(this)
-        reminderScheduler = ReminderScheduler(this)
-        phantomJournal    = PhantomJournal(this)
-        proactiveEngine   = ProactiveEngine(this)
-        intentClassifier  = IntentClassifier(this)
-        vectorizer        = TextVectorizer()
-        labelMapper       = LabelMapper(this)
-        db                = KateDatabase.getDatabase(this)
-        habitDao          = db.habitDao()
+        try {
+            bridge            = KateBridge(this)
+            tts               = KateTts(this)
+            deviceController  = KateDeviceController(this)
+            reminderScheduler = ReminderScheduler(this)
+            phantomJournal    = PhantomJournal(this)
+            proactiveEngine   = ProactiveEngine(this)
+            intentClassifier  = IntentClassifier(this)
+            vectorizer        = TextVectorizer()
+            labelMapper       = LabelMapper(this)
+            db                = KateDatabase.getDatabase(this)
+            habitDao          = db.habitDao()
 
-        speechManager = KateSpeechManager(this) { text ->
-    android.util.Log.d("Kate", "Speech result: $text")
-    // Show what was heard
-    KateEventBus.emit(KateEvent.Error("Heard: $text"))
-    // Process the command
-    bridge.processText(text)
-    // Re-listen automatically
-    scope.launch(Dispatchers.Main) {
-        kotlinx.coroutines.delay(500)
-        speechManager.startListening()
-    }
-        }
-                is KateEvent.IntentEvent  -> handleIntent(event)
-                is KateEvent.HabitUpdate  -> persistHabit(event)
-                is KateEvent.Suggestion   -> {
-                    val ok = deviceController.openApp(event.entity)
-                    tts.speak(if (ok) "Opening your usual app" else "You usually open this app now")
+            speechManager = KateSpeechManager(this) { text ->
+                Log.d("Kate", "Speech result: $text")
+                KateEventBus.emit(KateEvent.Error("Heard: $text"))
+                bridge.processText(text)
+                scope.launch(Dispatchers.Main) {
+                    delay(500)
+                    speechManager.startListening()
                 }
-                is KateEvent.AppOpened    -> {
-                    phantomJournal.logAppOpen(event.packageName)
-                    proactiveEngine.evaluate()
-                }
-                is KateEvent.Error        -> Log.e("Kate", event.message)
             }
-        }
 
-        bridge.startAudio()
-        // Auto-trigger listening for testing
-scope.launch(Dispatchers.Main) {
-    try {
-        kotlinx.coroutines.delay(3000)
-        tts.speak("Kate is ready. Speak your command.")
-        kotlinx.coroutines.delay(2000)
-        speechManager.startListening()
-    } catch (e: Exception) {
-        android.util.Log.e("KateService", "Listen error: ${e.message}")
+            bridge.updateAppList(loadInstalledApps())
+
+            scope.launch {
+                val formatted = habitDao.getAll()
+                    .map { "${it.intent}|${it.entity}|${it.count}" }
+                    .toTypedArray()
+                bridge.loadHabits(formatted)
+            }
+
+            KateEventBus.subscribe { event ->
+                when (event) {
+                    is KateEvent.WakeWordDetected -> {
+                        Log.d("Kate", "Wake word detected!")
+                        speechManager.startListening()
+                    }
+                    is KateEvent.IntentEvent  -> handleIntent(event)
+                    is KateEvent.HabitUpdate  -> persistHabit(event)
+                    is KateEvent.Suggestion   -> {
+                        val ok = deviceController.openApp(event.entity)
+                        tts.speak(
+                            if (ok) "Opening your usual app"
+                            else "You usually open this app now"
+                        )
+                    }
+                    is KateEvent.AppOpened -> {
+                        phantomJournal.logAppOpen(event.packageName)
+                        proactiveEngine.evaluate()
+                    }
+                    is KateEvent.Error -> Log.e("Kate", event.message)
+                }
+            }
+
+            bridge.startAudio()
+
+            // Auto-trigger listening — bypasses wake word for testing
+            scope.launch(Dispatchers.Main) {
+                try {
+                    delay(3000)
+                    tts.speak("Kate is ready. Speak your command.")
+                    delay(2000)
+                    speechManager.startListening()
+                } catch (e: Exception) {
+                    Log.e("KateService", "Auto-listen error: ${e.message}")
+                }
+            }
+
+        } catch (e: Exception) {
+            Log.e("KateService", "Startup error: ${e.message}")
+        }
     }
-  }
-}
-    
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
-    override fun onDestroy() { bridge.stopAudio(); scope.cancel(); super.onDestroy() }
+
+    override fun onDestroy() {
+        bridge.stopAudio()
+        speechManager.stopListening()
+        scope.cancel()
+        super.onDestroy()
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // ── Intent handler — aligned with trained model labels ───
     private fun handleIntent(event: KateEvent.IntentEvent) {
         applyEmotion(event.emotion)
         when (event.intent) {
             IntentType.OPEN_APP -> {
-                if (event.entity.isBlank()) { tts.speak("Which app should I open?"); return }
+                if (event.entity.isBlank()) {
+                    tts.speak("Which app should I open?")
+                    return
+                }
                 val ok = deviceController.openApp(event.entity)
                 tts.speak(if (ok) "Opening app" else "I couldn't find that app")
             }
@@ -121,7 +152,7 @@ scope.launch(Dispatchers.Main) {
         when (emotion) {
             EmotionType.STRESSED -> tts.speak("You sound stressed. I'll keep it simple.")
             EmotionType.URGENT   -> tts.speak("Got it. On it now.")
-            EmotionType.CALM     -> Unit
+            EmotionType.CALM,
             EmotionType.NEUTRAL  -> Unit
         }
     }
@@ -130,20 +161,30 @@ scope.launch(Dispatchers.Main) {
         val parts = entity.split("|")
         val task  = parts.getOrNull(0) ?: "task"
         val delay = parts.getOrNull(1)?.toLongOrNull() ?: 0L
-        if (delay > 0) { reminderScheduler.schedule(task, delay); tts.speak("Reminder set for $task") }
-        else tts.speak("I couldn't understand the time")
+        if (delay > 0) {
+            reminderScheduler.schedule(task, delay)
+            tts.speak("Reminder set for $task")
+        } else {
+            tts.speak("I couldn't understand the time")
+        }
     }
 
     private fun handleCommunication(entity: String) {
         tts.speak("Who should I contact?")
-        // Phase 3: extract contact name and route to call/SMS
     }
 
     private fun persistHabit(event: KateEvent.HabitUpdate) {
         scope.launch {
             val key      = "${event.intent}_${event.entity}"
             val existing = habitDao.getAll().find { it.key == key }
-            habitDao.insert(HabitEntity(key = key, intent = event.intent, entity = event.entity, count = (existing?.count ?: 0) + 1))
+            habitDao.insert(
+                HabitEntity(
+                    key    = key,
+                    intent = event.intent,
+                    entity = event.entity,
+                    count  = (existing?.count ?: 0) + 1
+                )
+            )
         }
     }
 
@@ -153,14 +194,22 @@ scope.launch(Dispatchers.Main) {
         }.toTypedArray()
 
     private fun startForegroundServiceSafe() {
-        val channel = NotificationChannel(CHANNEL_ID, "Kate Assistant", NotificationManager.IMPORTANCE_LOW)
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        startForeground(NOTIFICATION_ID,
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "Kate Assistant",
+            NotificationManager.IMPORTANCE_LOW
+        )
+        getSystemService(NotificationManager::class.java)
+            .createNotificationChannel(channel)
+        startForeground(
+            NOTIFICATION_ID,
             NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Kate is running")
-                .setContentText("Listening for wake word...")
+                .setContentText("Listening for your command...")
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                .setOngoing(true).setSilent(true).build()
+                .setOngoing(true)
+                .setSilent(true)
+                .build()
         )
     }
 }
