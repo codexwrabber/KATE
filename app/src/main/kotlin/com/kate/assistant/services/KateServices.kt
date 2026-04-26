@@ -94,6 +94,7 @@ scope.launch {
     tts.speak("Kate is ready. Speak your command.")
     
     }
+}
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
     override fun onDestroy() { bridge.stopAudio(); scope.cancel(); super.onDestroy() }
