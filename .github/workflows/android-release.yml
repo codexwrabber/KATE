@@ -63,12 +63,6 @@ jobs:
           echo "=== LIB PACKAGING CHECK ==="
           unzip -v $APK | grep "\.so"
 
-      - name: Zipalign with 16KB pages
-        run: |
-          APK=$(find app/build/outputs/apk/release/ -name "*.apk" | head -1)
-          $ANDROID_HOME/build-tools/34.0.0/zipalign -v -p 16 $APK app-release-aligned.apk
-          cp app-release-aligned.apk $APK
-
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
