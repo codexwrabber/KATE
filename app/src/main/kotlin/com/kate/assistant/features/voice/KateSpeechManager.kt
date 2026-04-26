@@ -120,3 +120,4 @@ class KateSpeechManager(
     }
 
     fun isActive() = isListening
+}
