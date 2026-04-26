@@ -59,8 +59,60 @@ class KateService : Service() {
 
             speechManager = KateSpeechManager(this) { text ->
                 Log.d("Kate", "Speech result: $text")
+                val lower = text.lowercase()
+
+                // Show what was heard on screen
                 KateEventBus.emit(KateEvent.Error("Heard: $text"))
-                bridge.processText(text)
+
+                // Handle directly in Kotlin
+                when {
+                    lower.contains("open") ||
+                    lower.contains("launch") -> {
+                        val appName = lower
+                            .replace("open", "")
+                            .replace("launch", "")
+                            .trim()
+                        tts.speak("Opening $appName")
+                        val ok = deviceController.openApp(appName)
+                        if (!ok) tts.speak("I couldn't find $appName")
+                    }
+                    lower.contains("play") -> {
+                        tts.speak("Playing music")
+                        deviceController.openApp("com.spotify.music")
+                    }
+                    lower.contains("call") -> {
+                        tts.speak("Who should I call?")
+                    }
+                    lower.contains("remind") -> {
+                        tts.speak("Reminder noted")
+                    }
+                    lower.contains("torch") ||
+                    lower.contains("flashlight") -> {
+                        tts.speak("Toggling flashlight")
+                    }
+                    lower.contains("hello") ||
+                    lower.contains("hi") -> {
+                        tts.speak("Hello! How can I help you?")
+                    }
+                    lower.contains("volume up") -> {
+                        tts.speak("Turning volume up")
+                    }
+                    lower.contains("volume down") -> {
+                        tts.speak("Turning volume down")
+                    }
+                    lower.contains("stop") ||
+                    lower.contains("bye") -> {
+                        tts.speak("Goodbye!")
+                    }
+                    else -> {
+                        tts.speak("You said $text. I am still learning.")
+                    }
+                }
+
+                // Also send to C engine for habit learning
+                try { bridge.processText(text) } catch (e: Exception) { }
+
+                // Re-listen automatically
                 scope.launch(Dispatchers.Main) {
                     delay(500)
                     speechManager.startListening()
