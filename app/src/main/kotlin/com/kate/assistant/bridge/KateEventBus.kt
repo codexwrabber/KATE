@@ -9,6 +9,12 @@ object KateEventBus {
 
     fun emit(event: KateEvent) { _events.tryEmit(event) }
 
+    // Called from MainActivity with speech results
+    fun emitSpeech(text: String) {
+        _events.tryEmit(KateEvent.Error("Heard: $text"))
+        _events.tryEmit(KateEvent.SpeechResult(text))
+    }
+
     fun subscribe(handler: (KateEvent) -> Unit) {
         scope.launch { _events.collect { handler(it) } }
     }
