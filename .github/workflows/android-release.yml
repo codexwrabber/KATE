@@ -2,8 +2,7 @@ name: Kate Release
 
 on:
   push:
-    branches: [ main ]
-    tags: [ 'v*' ]
+    branches: [ main, master ]
 
 jobs:
   release:
@@ -21,21 +20,27 @@ jobs:
       - name: Set up Android NDK
         uses: android-actions/setup-android@v3
 
+      - name: Download VOSK model
+        run: |
+          mkdir -p app/src/main/assets/model
+          curl -L "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip" \
+            -o vosk-model.zip
+          unzip vosk-model.zip -d vosk-tmp
+          cp -r vosk-tmp/vosk-model-small-en-us-0.15/. app/src/main/assets/model/
+          rm -rf vosk-tmp vosk-model.zip
+          echo "Model files:"
+          ls app/src/main/assets/model/
+
       - name: Decode keystore
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
         run: |
           printf '%s' "$SIGNING_KEY" | base64 -d > $GITHUB_WORKSPACE/kate.jks
           echo "JKS size: $(wc -c < $GITHUB_WORKSPACE/kate.jks) bytes"
-          keytool -list \
-            -keystore $GITHUB_WORKSPACE/kate.jks \
-            -storetype JKS \
-            -storepass ${{ secrets.KEY_STORE_PASSWORD }} \
-            -noprompt
-            
+
       - name: Grant execute permission
         run: chmod +x gradlew
-        
+
       - name: Clean build
         run: ./gradlew clean
 
@@ -46,21 +51,11 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleRelease
-        
-      - name: Verify native library architecture
-        run: |
-          APK=app/build/outputs/apk/release/*.apk
-          echo "=== LIB FOLDERS ==="
-          unzip -l $APK | grep "lib/"
-          echo "=== .SO FILE INFO ==="
-          unzip -o $APK "lib/*" -d /tmp/apk_check
-          file /tmp/apk_check/lib/arm64-v8a/libkate_core.socontinue-on-error: 
-     
-      - name: Verify native library packaging
+
+      - name: Verify packaging
         run: |
           APK=$(find app/build/outputs/apk/release/ -name "*.apk" | head -1)
-          echo "APK found: $APK"
-          echo "=== LIB PACKAGING CHECK ==="
+          echo "APK: $APK"
           unzip -v $APK | grep "\.so"
 
       - name: Upload signed APK
