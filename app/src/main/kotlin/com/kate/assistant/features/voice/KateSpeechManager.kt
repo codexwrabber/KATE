@@ -1,121 +1,140 @@
 package com.kate.assistant.features.voice
 
 import android.content.Context
-import android.content.Intent
-import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
+import android.content.res.AssetManager
 import android.util.Log
+import org.vosk.Model
+import org.vosk.Recognizer
+import org.vosk.android.RecognitionListener
+import org.vosk.android.SpeechService
+import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
 
 class KateSpeechManager(
     private val context: Context,
     private val onResult: (String) -> Unit
 ) {
-    private var recognizer: SpeechRecognizer? = null
+    private var model: Model? = null
+    private var speechService: SpeechService? = null
     private var isListening = false
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private var isModelReady = false
 
-    private fun buildIntent(): Intent =
-        Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
-        }
-
-    fun startListening() {
-        // Always run on main thread
-        mainHandler.post {
-            if (isListening) {
-                Log.d("KateSpeech", "Already listening — skipping")
-                return@post
-            }
-
-            if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-                Log.e("KateSpeech", "Speech recognition NOT available!")
-                return@post
-            }
-
+    init {
+        Thread {
             try {
-                Log.d("KateSpeech", "Creating recognizer on main thread...")
-                recognizer?.destroy()
-                recognizer = SpeechRecognizer.createSpeechRecognizer(context)
-
-                recognizer?.setRecognitionListener(object : RecognitionListener {
-                    override fun onReadyForSpeech(params: Bundle?) {
-                        isListening = true
-                        Log.d("KateSpeech", "✅ Ready — speak now!")
-                    }
-                    override fun onBeginningOfSpeech() {
-                        Log.d("KateSpeech", "🎤 Speech detected!")
-                    }
-                    override fun onRmsChanged(rmsdB: Float) {}
-                    override fun onBufferReceived(buffer: ByteArray?) {}
-                    override fun onEndOfSpeech() {
-                        Log.d("KateSpeech", "🔇 End of speech")
-                        isListening = false
-                    }
-                    override fun onError(error: Int) {
-                        isListening = false
-                        val msg = when (error) {
-                            SpeechRecognizer.ERROR_AUDIO              -> "Audio error"
-                            SpeechRecognizer.ERROR_CLIENT             -> "Client error"
-                            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "No permission!"
-                            SpeechRecognizer.ERROR_NETWORK            -> "Network error"
-                            SpeechRecognizer.ERROR_NETWORK_TIMEOUT    -> "Network timeout"
-                            SpeechRecognizer.ERROR_NO_MATCH           -> "No match found"
-                            SpeechRecognizer.ERROR_RECOGNIZER_BUSY    -> "Recognizer busy"
-                            SpeechRecognizer.ERROR_SERVER             -> "Server error"
-                            SpeechRecognizer.ERROR_SPEECH_TIMEOUT     -> "Speech timeout"
-                            else                                      -> "Unknown error $error"
-                        }
-                        Log.e("KateSpeech", "❌ Error: $msg (code $error)")
-                    }
-                    override fun onResults(results: Bundle) {
-                        isListening = false
-                        val matches = results
-                            .getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        Log.d("KateSpeech", "✅ Results: $matches")
-                        val text = matches?.firstOrNull() ?: return
-                        onResult(text)
-                    }
-                    override fun onPartialResults(partial: Bundle?) {
-                        val text = partial
-                            ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                            ?.firstOrNull()
-                        Log.d("KateSpeech", "Partial: $text")
-                    }
-                    override fun onEvent(type: Int, params: Bundle?) {
-                        Log.d("KateSpeech", "Event: $type")
-                    }
-                })
-
-                Log.d("KateSpeech", "Starting listening...")
-                recognizer?.startListening(buildIntent())
-
+                initModel()
             } catch (e: Exception) {
-                Log.e("KateSpeech", "Exception: ${e.message}")
-                isListening = false
+                Log.e("KateSpeech", "Model init failed: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun initModel() {
+        val modelDir = File(context.filesDir, "vosk-model")
+        if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
+            Log.d("KateSpeech", "Copying model from assets...")
+            copyAssetFolder(context.assets, "model", modelDir.absolutePath)
+        }
+        model = Model(modelDir.absolutePath)
+        isModelReady = true
+        Log.d("KateSpeech", "✅ VOSK model loaded!")
+    }
+
+    private fun copyAssetFolder(
+        assetManager: AssetManager,
+        assetPath: String,
+        destPath: String
+    ) {
+        val files = assetManager.list(assetPath) ?: return
+        File(destPath).mkdirs()
+        for (file in files) {
+            val srcPath  = "$assetPath/$file"
+            val dstFile  = File(destPath, file)
+            val subFiles = assetManager.list(srcPath)
+            if (subFiles != null && subFiles.isNotEmpty()) {
+                copyAssetFolder(assetManager, srcPath, dstFile.absolutePath)
+            } else {
+                try {
+                    assetManager.open(srcPath).use { input ->
+                        FileOutputStream(dstFile).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                } catch (e: IOException) {
+                    Log.e("KateSpeech", "Copy failed: $srcPath — ${e.message}")
+                }
             }
         }
     }
 
+    fun startListening() {
+        if (isListening) return
+        if (!isModelReady || model == null) {
+            Log.w("KateSpeech", "Model not ready yet — retrying in 1s")
+            android.os.Handler(android.os.Looper.getMainLooper())
+                .postDelayed({ startListening() }, 1000)
+            return
+        }
+        try {
+            val recognizer = Recognizer(model, 16000.0f)
+            speechService  = SpeechService(recognizer, 16000.0f)
+            speechService?.startListening(object : RecognitionListener {
+                override fun onPartialResult(hypothesis: String?) {
+                    hypothesis ?: return
+                    runCatching {
+                        val partial = JSONObject(hypothesis).optString("partial")
+                        if (partial.isNotBlank())
+                            Log.d("KateSpeech", "Partial: $partial")
+                    }
+                }
+                override fun onResult(hypothesis: String?) {
+                    hypothesis ?: return
+                    runCatching {
+                        val text = JSONObject(hypothesis).optString("text")
+                        if (text.isNotBlank()) {
+                            Log.d("KateSpeech", "✅ Result: $text")
+                            onResult(text)
+                        }
+                    }
+                }
+                override fun onFinalResult(hypothesis: String?) {
+                    hypothesis ?: return
+                    runCatching {
+                        val text = JSONObject(hypothesis).optString("text")
+                        if (text.isNotBlank()) {
+                            Log.d("KateSpeech", "Final: $text")
+                            onResult(text)
+                        }
+                    }
+                }
+                override fun onError(e: Exception?) {
+                    Log.e("KateSpeech", "Error: ${e?.message}")
+                    isListening = false
+                }
+                override fun onTimeout() {
+                    Log.d("KateSpeech", "Timeout")
+                    isListening = false
+                }
+            })
+            isListening = true
+            Log.d("KateSpeech", "🎤 VOSK listening started")
+        } catch (e: Exception) {
+            Log.e("KateSpeech", "Start failed: ${e.message}")
+            isListening = false
+        }
+    }
+
     fun stopListening() {
-        mainHandler.post {
-            try {
-                recognizer?.stopListening()
-                recognizer?.destroy()
-                recognizer  = null
-                isListening = false
-                Log.d("KateSpeech", "Stopped listening")
-            } catch (e: Exception) {
-                Log.e("KateSpeech", "Stop error: ${e.message}")
-            }
+        try {
+            speechService?.stop()
+            speechService?.shutdown()
+            speechService = null
+            isListening   = false
+            Log.d("KateSpeech", "VOSK stopped")
+        } catch (e: Exception) {
+            Log.e("KateSpeech", "Stop error: ${e.message}")
         }
     }
 
