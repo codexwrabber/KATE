@@ -14,14 +14,12 @@ import com.kate.assistant.features.nlp.TextVectorizer
 import com.kate.assistant.features.phantom.PhantomJournal
 import com.kate.assistant.features.phantom.ProactiveEngine
 import com.kate.assistant.features.tasks.ReminderScheduler
-import com.kate.assistant.features.voice.KateSpeechManager
 import com.kate.assistant.features.voice.KateTts
 import kotlinx.coroutines.*
 
 class KateService : Service() {
 
     private lateinit var bridge: KateBridge
-    private lateinit var speechManager: KateSpeechManager
     private lateinit var tts: KateTts
     private lateinit var deviceController: KateDeviceController
     private lateinit var reminderScheduler: ReminderScheduler
@@ -33,7 +31,8 @@ class KateService : Service() {
     private lateinit var vectorizer: TextVectorizer
     private lateinit var labelMapper: LabelMapper
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val scope       = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     companion object {
         private const val CHANNEL_ID      = "kate_service_channel"
@@ -57,68 +56,6 @@ class KateService : Service() {
             db                = KateDatabase.getDatabase(this)
             habitDao          = db.habitDao()
 
-            speechManager = KateSpeechManager(this) { text ->
-                Log.d("Kate", "Speech result: $text")
-                val lower = text.lowercase()
-
-                // Show what was heard on screen
-                KateEventBus.emit(KateEvent.Error("Heard: $text"))
-
-                // Handle directly in Kotlin
-                when {
-                    lower.contains("open") ||
-                    lower.contains("launch") -> {
-                        val appName = lower
-                            .replace("open", "")
-                            .replace("launch", "")
-                            .trim()
-                        tts.speak("Opening $appName")
-                        val ok = deviceController.openApp(appName)
-                        if (!ok) tts.speak("I couldn't find $appName")
-                    }
-                    lower.contains("play") -> {
-                        tts.speak("Playing music")
-                        deviceController.openApp("com.spotify.music")
-                    }
-                    lower.contains("call") -> {
-                        tts.speak("Who should I call?")
-                    }
-                    lower.contains("remind") -> {
-                        tts.speak("Reminder noted")
-                    }
-                    lower.contains("torch") ||
-                    lower.contains("flashlight") -> {
-                        tts.speak("Toggling flashlight")
-                    }
-                    lower.contains("hello") ||
-                    lower.contains("hi") -> {
-                        tts.speak("Hello! How can I help you?")
-                    }
-                    lower.contains("volume up") -> {
-                        tts.speak("Turning volume up")
-                    }
-                    lower.contains("volume down") -> {
-                        tts.speak("Turning volume down")
-                    }
-                    lower.contains("stop") ||
-                    lower.contains("bye") -> {
-                        tts.speak("Goodbye!")
-                    }
-                    else -> {
-                        tts.speak("You said $text. I am still learning.")
-                    }
-                }
-
-                // Also send to C engine for habit learning
-                try { bridge.processText(text) } catch (e: Exception) { }
-
-                // Re-listen automatically
-                scope.launch(Dispatchers.Main) {
-                    delay(500)
-                    speechManager.startListening()
-                }
-            }
-
             bridge.updateAppList(loadInstalledApps())
 
             scope.launch {
@@ -132,7 +69,59 @@ class KateService : Service() {
                 when (event) {
                     is KateEvent.WakeWordDetected -> {
                         Log.d("Kate", "Wake word detected!")
-                        speechManager.startListening()
+                    }
+                    is KateEvent.SpeechResult -> {
+                        val lower = event.text.lowercase()
+                        Log.d("Kate", "Processing: ${event.text}")
+                        when {
+                            lower.contains("open") ||
+                            lower.contains("launch") -> {
+                                val appName = lower
+                                    .replace("open", "")
+                                    .replace("launch", "")
+                                    .trim()
+                                tts.speak("Opening $appName")
+                                deviceController.openApp(appName)
+                            }
+                            lower.contains("play") -> {
+                                tts.speak("Playing music")
+                                deviceController.openApp("com.spotify.music")
+                            }
+                            lower.contains("call") -> {
+                                tts.speak("Who should I call?")
+                            }
+                            lower.contains("remind") -> {
+                                tts.speak("Reminder noted")
+                            }
+                            lower.contains("torch") ||
+                            lower.contains("flashlight") -> {
+                                tts.speak("Toggling flashlight")
+                            }
+                            lower.contains("hello") ||
+                            lower.contains("hi") -> {
+                                tts.speak("Hello! How can I help you?")
+                            }
+                            lower.contains("volume up") -> {
+                                tts.speak("Turning volume up")
+                            }
+                            lower.contains("volume down") -> {
+                                tts.speak("Turning volume down")
+                            }
+                            lower.contains("search for") -> {
+                                val query = lower
+                                    .replace("search for", "")
+                                    .trim()
+                                tts.speak("Searching for $query")
+                            }
+                            lower.contains("stop") ||
+                            lower.contains("bye") -> {
+                                tts.speak("Goodbye!")
+                            }
+                            else -> {
+                                tts.speak("You said ${event.text}. I am still learning.")
+                            }
+                        }
+                        try { bridge.processText(event.text) } catch (e: Exception) { }
                     }
                     is KateEvent.IntentEvent  -> handleIntent(event)
                     is KateEvent.HabitUpdate  -> persistHabit(event)
@@ -147,19 +136,17 @@ class KateService : Service() {
                         phantomJournal.logAppOpen(event.packageName)
                         proactiveEngine.evaluate()
                     }
-                    is KateEvent.Error -> Log.e("Kate", event.message)
+                    is KateEvent.Error -> Log.d("Kate", event.message)
                 }
             }
 
             bridge.startAudio()
 
-// Auto-trigger on main thread — SpeechRecognizer requires main looper
-Handler(Looper.getMainLooper()).postDelayed({
-    tts.speak("Kate is ready. Speak your command.")
-    Handler(Looper.getMainLooper()).postDelayed({
-        speechManager.startListening()
-    }, 2000)
-}, 3000)
+            // Greet on startup
+            mainHandler.postDelayed({
+                tts.speak("Kate is ready. Speak your command.")
+            }, 2000)
+
         } catch (e: Exception) {
             Log.e("KateService", "Startup error: ${e.message}")
         }
@@ -169,7 +156,6 @@ Handler(Looper.getMainLooper()).postDelayed({
 
     override fun onDestroy() {
         bridge.stopAudio()
-        speechManager.stopListening()
         scope.cancel()
         super.onDestroy()
     }
@@ -248,15 +234,23 @@ Handler(Looper.getMainLooper()).postDelayed({
         )
         getSystemService(NotificationManager::class.java)
             .createNotificationChannel(channel)
-        startForeground(
-            NOTIFICATION_ID,
-            NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("Kate is running")
-                .setContentText("Listening for your command...")
-                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                .setOngoing(true)
-                .setSilent(true)
-                .build()
-        )
+
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Kate is running")
+            .setContentText("Listening for your command...")
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setOngoing(true)
+            .setSilent(true)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 }
