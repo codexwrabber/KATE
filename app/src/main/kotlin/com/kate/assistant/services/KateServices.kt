@@ -291,6 +291,50 @@ class KateService : Service() {
                 tts.speak("Today is $date")
             }
 
+            // ── Accessibility actions ─────────────────────────────
+lower.contains("go back") -> {
+    KateAccessibilityService.instance?.goBack()
+    tts.speak("Going back")
+}
+
+lower.contains("go home") -> {
+    KateAccessibilityService.instance?.goHome()
+    tts.speak("Going home")
+}
+
+lower.contains("show notifications") ||
+lower.contains("open notifications") -> {
+    KateAccessibilityService.instance?.showNotifications()
+    tts.speak("Opening notifications")
+}
+
+lower.contains("take screenshot") -> {
+    KateAccessibilityService.instance?.takeScreenshot()
+    tts.speak("Screenshot taken")
+}
+
+lower.contains("recent apps") ||
+lower.contains("show recents") -> {
+    KateAccessibilityService.instance?.openRecents()
+    tts.speak("Recent apps")
+}
+
+lower.contains("type ") ||
+lower.contains("write ") -> {
+    val text = lower
+        .replace("type", "")
+        .replace("write", "")
+        .trim()
+    val ok = KateAccessibilityService.instance?.ghostType(text) ?: false
+    tts.speak(if (ok) "Typed" else "Nothing to type into")
+}
+
+lower.contains("read screen") ||
+lower.contains("what's on screen") -> {
+    val screen = KateAccessibilityService.instance?.readScreen() ?: ""
+    tts.speak(if (screen.isNotBlank()) screen.take(200) else "Nothing on screen")
+}
+
             // ── Stop ──────────────────────────────────────────
             lower.contains("stop listening") ||
             lower.contains("goodbye kate") ||
