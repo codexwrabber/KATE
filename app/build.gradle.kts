@@ -14,8 +14,8 @@ android {
         applicationId   = "com.kate.assistant"
         minSdk          = 26
         targetSdk       = 34
-        versionCode     = 8
-        versionName     = "1.0.7"
+        versionCode     = 9
+        versionName     = "1.0.8"
         multiDexEnabled = true
 
         externalNativeBuild {
@@ -53,7 +53,7 @@ android {
 
     packaging {
         jniLibs {
-            useLegacyPackaging = true
+            useLegacyPackaging = false
         }
     }
 
@@ -82,6 +82,7 @@ android {
 }
 
 dependencies {
+    implementation(libs.vosk)
     implementation(libs.hilt.android)
     kapt(libs.hilt.compiler)
     implementation(platform(libs.compose.bom))
