@@ -27,34 +27,29 @@ class KateService : Service() {
 
         tts = KateTts(this)
 
-        // ─────────────────────────────
-        // INIT SPEECH ENGINE (NO DELAY START)
-        // ─────────────────────────────
         speechManager = KateSpeechManager(
-            context = this,
-            onResult = { text -> handleSpeech(text) },
-            onProactive = { suggestion -> handleProactive(suggestion) }
+            this,
+            onResult = { handleSpeech(it) }
         )
 
-        // 🔥 CRITICAL FIX: START MIC FIRST
-        speechManager.startListening()
-
-        // 🔥 THEN SPEAK (NON-BLOCKING)
+        // 🔥 Delay to ensure service stability
         Handler(Looper.getMainLooper()).postDelayed({
-            speechManager.setSpeaking(true)
 
-            tts.speak("Kate is online")
+            speechManager.startListening()
 
             Handler(Looper.getMainLooper()).postDelayed({
-                speechManager.setSpeaking(false)
-            }, 1200)
+                speechManager.setSpeaking(true)
+                tts.speak("Kate is online")
 
-        }, 600)
+                Handler(Looper.getMainLooper()).postDelayed({
+                    speechManager.setSpeaking(false)
+                }, 1000)
+
+            }, 500)
+
+        }, 800)
     }
 
-    // ─────────────────────────────
-    // SPEECH RESULT HANDLER
-    // ─────────────────────────────
     private fun handleSpeech(text: String) {
 
         when (text) {
@@ -78,31 +73,13 @@ class KateService : Service() {
         }
     }
 
-    // ─────────────────────────────
-    // PROACTIVE RESPONSE
-    // ─────────────────────────────
-    private fun handleProactive(text: String) {
-
-        Log.d("Kate", "Proactive: $text")
-
-        speechManager.setSpeaking(true)
-        tts.speak(text)
-
-        Handler(Looper.getMainLooper()).postDelayed({
-            speechManager.setSpeaking(false)
-        }, 1200)
-    }
-
-    // ─────────────────────────────
-    // COMMAND LOGIC
-    // ─────────────────────────────
     private suspend fun handleVoiceCommand(text: String) {
 
-        val lower = text.lowercase().trim()
+        val lower = text.lowercase()
 
         when {
 
-            lower.contains("hello") -> speak("Hello, how can I help?")
+            lower.contains("hello") -> speak("Hello")
 
             lower.contains("time") -> {
                 val time = java.text.SimpleDateFormat(
@@ -113,22 +90,12 @@ class KateService : Service() {
                 speak("It is $time")
             }
 
-            lower.contains("stop") -> {
-                speak("Stopping")
-                speechManager.stopListening()
-            }
-
             else -> speak("You said $text")
         }
     }
 
-    // ─────────────────────────────
-    // SAFE SPEAK WRAPPER
-    // ─────────────────────────────
     private fun speak(text: String) {
-
         speechManager.setSpeaking(true)
-
         tts.speak(text)
 
         Handler(Looper.getMainLooper()).postDelayed({
@@ -136,9 +103,6 @@ class KateService : Service() {
         }, 1000)
     }
 
-    // ─────────────────────────────
-    // FOREGROUND SERVICE
-    // ─────────────────────────────
     private fun startForegroundServiceSafe() {
 
         val channel = NotificationChannel(
