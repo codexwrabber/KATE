@@ -20,17 +20,6 @@ jobs:
       - name: Set up Android NDK
         uses: android-actions/setup-android@v3
 
-      - name: Download VOSK model
-        run: |
-          mkdir -p app/src/main/assets/model
-          curl -L "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip" \
-            -o vosk-model.zip
-          unzip vosk-model.zip -d vosk-tmp
-          cp -r vosk-tmp/vosk-model-small-en-us-0.15/. app/src/main/assets/model/
-          rm -rf vosk-tmp vosk-model.zip
-          echo "Model files:"
-          ls app/src/main/assets/model/
-
       - name: Decode keystore
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
