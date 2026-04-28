@@ -1,9 +1,12 @@
 package com.kate.assistant.features.voice
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.*
 import android.os.Process
 import android.util.Log
+import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -30,33 +33,46 @@ class KateSpeechManager(
     }
 
     // ─────────────────────────────
-    // MODEL LOAD
+    // INIT MODEL
     // ─────────────────────────────
     private fun initModel() {
         try {
             val modelDir = File(context.filesDir, "vosk-model")
 
             if (!modelDir.exists()) {
-                Log.e("KateSpeech", "Model missing")
+                Log.e("KateSpeech", "❌ Model not found")
                 return
             }
 
             model = Model(modelDir.absolutePath)
             recognizer = Recognizer(model, 16000.0f)
 
-            Log.d("KateSpeech", "Model ready")
+            Log.d("KateSpeech", "✅ Model loaded")
         } catch (e: Exception) {
-            Log.e("KateSpeech", "Model init failed: ${e.message}")
+            Log.e("KateSpeech", "❌ Model init failed: ${e.message}")
         }
     }
 
     // ─────────────────────────────
-    // START ALWAYS-ON LISTENER
+    // START LISTENING (AUTO RECOVERY)
     // ─────────────────────────────
     fun startListening() {
+
         if (isRunning.get()) return
+
+        // 🔒 Permission check
+        val permission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        )
+
+        if (permission != PackageManager.PERMISSION_GRANTED) {
+            Log.e("KateSpeech", "❌ RECORD_AUDIO not granted")
+            return
+        }
+
         if (recognizer == null) {
-            Log.e("KateSpeech", "Recognizer not ready")
+            Log.e("KateSpeech", "❌ Recognizer not ready")
             return
         }
 
@@ -67,7 +83,7 @@ class KateSpeechManager(
             AudioFormat.ENCODING_PCM_16BIT
         )
 
-        audioRecord = AudioRecord(
+        val record = AudioRecord(
             MediaRecorder.AudioSource.MIC,
             sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
@@ -75,7 +91,21 @@ class KateSpeechManager(
             bufferSize * 2
         )
 
-        audioRecord?.startRecording()
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            Log.e("KateSpeech", "❌ AudioRecord init failed")
+            return
+        }
+
+        audioRecord = record
+
+        try {
+            audioRecord?.startRecording()
+            Log.d("KateSpeech", "🎤 Mic started")
+        } catch (e: Exception) {
+            Log.e("KateSpeech", "❌ Mic start failed: ${e.message}")
+            return
+        }
+
         isRunning.set(true)
 
         thread = Thread {
@@ -84,45 +114,63 @@ class KateSpeechManager(
 
             val buffer = ByteArray(bufferSize)
 
-            Log.d("KateSpeech", "🎤 Always listening...")
+            Log.d("KateSpeech", "🚀 Listening loop started")
 
             while (isRunning.get()) {
 
-                val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
-                if (read <= 0) continue
+                try {
 
-                // 🔥 CRITICAL: IGNORE WHILE SPEAKING
-                if (isSpeaking.get()) continue
-
-                val result = recognizer?.acceptWaveForm(buffer, read) ?: false
-
-                if (result) {
-
-                    val text = JSONObject(recognizer?.result ?: "{}")
-                        .optString("text")
-                        .lowercase()
-
-                    if (text.isNotBlank()) {
-                        handleResult(text)
+                    if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                        Log.e("KateSpeech", "⚠️ Mic stopped — recovering...")
+                        recoverMic()
+                        continue
                     }
-                } else {
 
-                    val partial = JSONObject(recognizer?.partialResult ?: "{}")
-                        .optString("partial")
-                        .lowercase()
+                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                    if (read <= 0) continue
 
-                    // optional proactive trigger
-                    if (partial.contains("weather") ||
-                        partial.contains("remind") ||
-                        partial.contains("open")) {
+                    if (isSpeaking.get()) continue
 
-                        onProactive?.invoke("I'm listening...")
+                    val result = recognizer?.acceptWaveForm(buffer, read) ?: false
+
+                    if (result) {
+
+                        val text = JSONObject(recognizer?.result ?: "{}")
+                            .optString("text")
+                            .lowercase()
+
+                        if (text.isNotBlank()) {
+                            handleResult(text)
+                        }
+
+                    } else {
+
+                        val partial = JSONObject(recognizer?.partialResult ?: "{}")
+                            .optString("partial")
+                            .lowercase()
+
+                        if (partial.contains("hey kate")) {
+                            onResult("WAKE")
+                        }
                     }
+
+                } catch (e: Exception) {
+                    Log.e("KateSpeech", "🔥 Loop crash: ${e.message}")
+                    recoverMic()
                 }
             }
         }
 
         thread?.start()
+    }
+
+    // ─────────────────────────────
+    // AUTO RECOVERY
+    // ─────────────────────────────
+    private fun recoverMic() {
+        stopListening()
+        Thread.sleep(500)
+        startListening()
     }
 
     // ─────────────────────────────
@@ -133,9 +181,7 @@ class KateSpeechManager(
         Log.d("KateSpeech", "Heard: $text")
 
         when {
-
-            text.contains("hey kate") ||
-            text.contains("wake") -> {
+            text.contains("hey kate") -> {
                 wakeMode.set(true)
                 onResult("WAKE")
             }
@@ -144,15 +190,11 @@ class KateSpeechManager(
                 wakeMode.set(false)
                 onResult(text)
             }
-
-            else -> {
-                // ignore background noise until wake
-            }
         }
     }
 
     // ─────────────────────────────
-    // TTS CONTROL (IMPORTANT FIX)
+    // SPEAKING CONTROL
     // ─────────────────────────────
     fun setSpeaking(state: Boolean) {
         isSpeaking.set(state)
