@@ -5,7 +5,6 @@ import android.content.Intent
 import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.kate.assistant.bridge.*
 import com.kate.assistant.features.voice.KateSpeechManager
 import com.kate.assistant.features.voice.KateTts
 import kotlinx.coroutines.*
@@ -23,46 +22,54 @@ class KateService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+
         startForegroundServiceSafe()
 
         tts = KateTts(this)
 
         speechManager = KateSpeechManager(this) { text ->
-            Log.d("Kate", "Heard: $text")
 
-            // 🔴 STOP listening immediately
-            speechManager.stopListening()
+            when (text) {
 
-            // 🔴 Move processing off main thread
-            scope.launch(Dispatchers.Default) {
-                handleVoiceCommand(text)
+                // 🔥 WAKE WORD EVENT
+                "WAKE_WORD" -> {
+                    Log.d("Kate", "Wake word detected")
+
+                    tts.speak("Yes?") {
+                        // switch back to idle listening
+                        speechManager.activateListening()
+                    }
+                }
+
+                // 🔥 NORMAL COMMAND FLOW
+                else -> {
+                    Log.d("Kate", "Command: $text")
+
+                    scope.launch(Dispatchers.Default) {
+                        handleVoiceCommand(text)
+                    }
+                }
             }
         }
 
-        // 🔴 Start flow safely
-        scope.launch {
-            speakAndResume("Kate is ready.")
-        }
-    }
-
-    // ✅ SAFE SPEAK + RESUME
-    private suspend fun speakAndResume(text: String) {
-        withContext(Dispatchers.Main) {
-            tts.speak(text)
-        }
-
-        delay(1500) // allow speech to finish (simple safe approach)
-
+        // 🔥 START ALWAYS-ON LISTENER
         speechManager.startListening()
+
+        // 🔥 BOOT SPEECH
+        tts.speak("Kate is online")
     }
 
-    // ✅ BACKGROUND COMMAND HANDLER
+    // ─────────────────────────────
+    // COMMAND HANDLER
+    // ─────────────────────────────
     private suspend fun handleVoiceCommand(text: String) {
+
         val lower = text.lowercase().trim()
 
         when {
+
             lower.contains("hello") -> {
-                speakAndResume("Hello, how can I help?")
+                speak("Hello, how can I help?")
             }
 
             lower.contains("time") -> {
@@ -71,32 +78,32 @@ class KateService : Service() {
                     java.util.Locale.getDefault()
                 ).format(java.util.Date())
 
-                speakAndResume("It is $time")
+                speak("It is $time")
             }
 
             lower.contains("stop") -> {
-                withContext(Dispatchers.Main) {
-                    tts.speak("Goodbye")
-                }
+                speak("Goodbye")
                 speechManager.stopListening()
             }
 
             else -> {
-                speakAndResume("You said $text")
+                speak("You said $text")
             }
         }
     }
 
-    override fun onDestroy() {
-        speechManager.stopListening()
-        scope.cancel()
-        super.onDestroy()
+    // ─────────────────────────────
+    // SAFE SPEAK WRAPPER
+    // ─────────────────────────────
+    private fun speak(text: String) {
+        tts.speak(text)
     }
 
-    override fun onBind(intent: Intent?) = null
-
-    // ✅ FOREGROUND SERVICE
+    // ─────────────────────────────
+    // FOREGROUND SERVICE
+    // ─────────────────────────────
     private fun startForegroundServiceSafe() {
+
         val channel = NotificationChannel(
             CHANNEL_ID,
             "Kate Assistant",
@@ -108,10 +115,19 @@ class KateService : Service() {
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Kate is running")
-            .setContentText("Listening...")
+            .setContentText("Listening for wake word...")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setOngoing(true)
             .build()
 
         startForeground(1, notification)
     }
+
+    override fun onDestroy() {
+        speechManager.stopListening()
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?) = null
 }
