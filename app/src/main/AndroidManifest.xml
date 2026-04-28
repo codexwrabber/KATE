@@ -4,6 +4,9 @@
     <!-- Audio -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- 🔴 REQUIRED for Android 14 foreground mic -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
     <!-- Device control -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
     <uses-permission android:name="android.permission.SEND_SMS" />
@@ -22,20 +25,22 @@
 
     <!-- Foreground service -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Background and boot -->
+    <!-- Background -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
-    <!-- Hardware feature tags -->
-    <uses-feature android:name="android.hardware.telephony"  android:required="false" />
-    <uses-feature android:name="android.hardware.camera"     android:required="false" />
-    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <!-- 🔴 REMOVE THIS (can cause issues on some devices) -->
+    <!-- <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" /> -->
+
+    <!-- 🔴 MAKE MIC REQUIRED FOR DEBUGGING -->
+    <uses-feature android:name="android.hardware.microphone" android:required="true" />
+
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.location.gps" android:required="false" />
 
-    <!-- App visibility Android 11+ -->
+    <!-- App visibility -->
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -45,18 +50,17 @@
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="https" />
         </intent>
-        <package android:name="com.spotify.music" />
-        <package android:name="com.google.android.youtube" />
-        <package android:name="com.google.android.youtube.music" />
-        <package android:name="com.soundcloud.android" />
     </queries>
 
     <application
         android:name=".KateApp"
         android:allowBackup="false"
-        android:extractNativeLibs="false"
-        android:hardwareAccelerated="false"
-        android:largeHeap="false"
+
+        <!-- 🔴 REMOVE THIS (AGP warning + can break native loading) -->
+        <!-- android:extractNativeLibs="false" -->
+
+        android:hardwareAccelerated="true"
+        android:largeHeap="true"
         android:icon="@drawable/ic_kate"
         android:label="Kate"
         android:theme="@style/Theme.Kate">
@@ -70,6 +74,7 @@
             </intent-filter>
         </activity>
 
+        <!-- ✅ MICROPHONE FOREGROUND SERVICE -->
         <service
             android:name=".services.KateService"
             android:enabled="true"
