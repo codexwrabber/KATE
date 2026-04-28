@@ -28,60 +28,65 @@ class KateService : Service() {
         tts = KateTts(this)
 
         // ─────────────────────────────
-        // SPEECH ENGINE INIT (FIXED)
+        // INIT SPEECH ENGINE (NO DELAY START)
         // ─────────────────────────────
         speechManager = KateSpeechManager(
             context = this,
+            onResult = { text -> handleSpeech(text) },
+            onProactive = { suggestion -> handleProactive(suggestion) }
+        )
 
-            // NORMAL SPEECH
-            onResult = { text ->
+        // 🔥 CRITICAL FIX: START MIC FIRST
+        speechManager.startListening()
 
-                when (text) {
+        // 🔥 THEN SPEAK (NON-BLOCKING)
+        Handler(Looper.getMainLooper()).postDelayed({
+            speechManager.setSpeaking(true)
 
-                    "WAKE" -> {
-                        Log.d("Kate", "Wake word detected")
+            tts.speak("Kate is online")
 
-                        speechManager.setSpeaking(true)
+            Handler(Looper.getMainLooper()).postDelayed({
+                speechManager.setSpeaking(false)
+            }, 1200)
 
-                        tts.speak("Yes?")
+        }, 600)
+    }
 
-                        // resume listening safely
-                        Handler(Looper.getMainLooper()).postDelayed({
-                            speechManager.setSpeaking(false)
-                            speechManager.activateListening()
-                        }, 900)
-                    }
+    // ─────────────────────────────
+    // SPEECH RESULT HANDLER
+    // ─────────────────────────────
+    private fun handleSpeech(text: String) {
 
-                    else -> {
-                        Log.d("Kate", "Command: $text")
+        when (text) {
 
-                        scope.launch(Dispatchers.Default) {
-                            handleVoiceCommand(text)
-                        }
-                    }
-                }
-            },
-
-            // ─────────────────────────────
-            // PROACTIVE ENGINE (NEW FIX)
-            // ─────────────────────────────
-            onProactive = { suggestion ->
-                Log.d("Kate", "Proactive: $suggestion")
+            "WAKE" -> {
+                Log.d("Kate", "Wake detected")
 
                 speechManager.setSpeaking(true)
-                tts.speak(suggestion)
+                tts.speak("Yes?")
 
                 Handler(Looper.getMainLooper()).postDelayed({
                     speechManager.setSpeaking(false)
-                }, 1200)
+                }, 800)
             }
-        )
 
-        // START ENGINE
-        speechManager.startListening()
+            else -> {
+                scope.launch {
+                    handleVoiceCommand(text)
+                }
+            }
+        }
+    }
+
+    // ─────────────────────────────
+    // PROACTIVE RESPONSE
+    // ─────────────────────────────
+    private fun handleProactive(text: String) {
+
+        Log.d("Kate", "Proactive: $text")
 
         speechManager.setSpeaking(true)
-        tts.speak("Kate is online")
+        tts.speak(text)
 
         Handler(Looper.getMainLooper()).postDelayed({
             speechManager.setSpeaking(false)
@@ -89,7 +94,7 @@ class KateService : Service() {
     }
 
     // ─────────────────────────────
-    // COMMAND HANDLER
+    // COMMAND LOGIC
     // ─────────────────────────────
     private suspend fun handleVoiceCommand(text: String) {
 
@@ -97,9 +102,7 @@ class KateService : Service() {
 
         when {
 
-            lower.contains("hello") -> {
-                speak("Hello, how can I help?")
-            }
+            lower.contains("hello") -> speak("Hello, how can I help?")
 
             lower.contains("time") -> {
                 val time = java.text.SimpleDateFormat(
@@ -111,13 +114,11 @@ class KateService : Service() {
             }
 
             lower.contains("stop") -> {
-                speak("Goodbye")
+                speak("Stopping")
                 speechManager.stopListening()
             }
 
-            else -> {
-                speak("You said $text")
-            }
+            else -> speak("You said $text")
         }
     }
 
@@ -125,6 +126,7 @@ class KateService : Service() {
     // SAFE SPEAK WRAPPER
     // ─────────────────────────────
     private fun speak(text: String) {
+
         speechManager.setSpeaking(true)
 
         tts.speak(text)
@@ -150,7 +152,7 @@ class KateService : Service() {
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Kate is running")
-            .setContentText("Listening for wake word...")
+            .setContentText("Always listening...")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
             .build()
