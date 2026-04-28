@@ -1,142 +1,113 @@
 package com.kate.assistant.features.voice
 
 import android.content.Context
-import android.content.res.AssetManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.os.Process
 import android.util.Log
 import org.vosk.Model
 import org.vosk.Recognizer
 import org.vosk.android.RecognitionListener
-import org.vosk.android.SpeechService
 import org.json.JSONObject
 import java.io.File
-import java.io.FileOutputStream
-import java.io.IOException
 
 class KateSpeechManager(
     private val context: Context,
     private val onResult: (String) -> Unit
 ) {
+
     private var model: Model? = null
-    private var speechService: SpeechService? = null
+    private var recognizer: Recognizer? = null
+    private var audioRecord: AudioRecord? = null
     private var isListening = false
-    private var isModelReady = false
+    private var thread: Thread? = null
 
     init {
         Thread {
-            try {
-                initModel()
-            } catch (e: Exception) {
-                Log.e("KateSpeech", "Model init failed: ${e.message}")
-            }
+            initModel()
         }.start()
     }
 
     private fun initModel() {
         val modelDir = File(context.filesDir, "vosk-model")
-        if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
-            Log.d("KateSpeech", "Copying model from assets...")
-            copyAssetFolder(context.assets, "model", modelDir.absolutePath)
-        }
-        model = Model(modelDir.absolutePath)
-        isModelReady = true
-        Log.d("KateSpeech", "✅ VOSK model loaded!")
-    }
 
-    private fun copyAssetFolder(
-        assetManager: AssetManager,
-        assetPath: String,
-        destPath: String
-    ) {
-        val files = assetManager.list(assetPath) ?: return
-        File(destPath).mkdirs()
-        for (file in files) {
-            val srcPath  = "$assetPath/$file"
-            val dstFile  = File(destPath, file)
-            val subFiles = assetManager.list(srcPath)
-            if (subFiles != null && subFiles.isNotEmpty()) {
-                copyAssetFolder(assetManager, srcPath, dstFile.absolutePath)
-            } else {
-                try {
-                    assetManager.open(srcPath).use { input ->
-                        FileOutputStream(dstFile).use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                } catch (e: IOException) {
-                    Log.e("KateSpeech", "Copy failed: $srcPath — ${e.message}")
-                }
-            }
+        if (!modelDir.exists()) {
+            Log.e("KateSpeech", "❌ Model not found in filesDir")
+            return
         }
+
+        model = Model(modelDir.absolutePath)
+        recognizer = Recognizer(model, 16000.0f)
+
+        Log.d("KateSpeech", "✅ Model loaded")
     }
 
     fun startListening() {
         if (isListening) return
-        if (!isModelReady || model == null) {
-            Log.w("KateSpeech", "Model not ready yet — retrying in 1s")
-            android.os.Handler(android.os.Looper.getMainLooper())
-                .postDelayed({ startListening() }, 1000)
+        if (recognizer == null) {
+            Log.e("KateSpeech", "Recognizer not ready")
             return
         }
-        try {
-            val recognizer = Recognizer(model, 16000.0f)
-            speechService  = SpeechService(recognizer, 16000.0f)
-            speechService?.startListening(object : RecognitionListener {
-                override fun onPartialResult(hypothesis: String?) {
-                    hypothesis ?: return
-                    runCatching {
-                        val partial = JSONObject(hypothesis).optString("partial")
-                        if (partial.isNotBlank())
+
+        val sampleRate = 16000
+        val bufferSize = AudioRecord.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+
+        audioRecord = AudioRecord(
+            MediaRecorder.AudioSource.MIC,
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            bufferSize
+        )
+
+        audioRecord?.startRecording()
+        isListening = true
+
+        thread = Thread {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+
+            val buffer = ByteArray(bufferSize)
+
+            Log.d("KateSpeech", "🎤 Listening started")
+
+            while (isListening) {
+                val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+
+                if (read > 0) {
+                    val result = recognizer?.acceptWaveForm(buffer, read) ?: false
+
+                    if (result) {
+                        val text = JSONObject(recognizer?.result ?: "{}")
+                            .optString("text")
+
+                        if (text.isNotBlank()) {
+                            Log.d("KateSpeech", "FINAL: $text")
+                            onResult(text)
+                        }
+                    } else {
+                        val partial = JSONObject(recognizer?.partialResult ?: "{}")
+                            .optString("partial")
+
+                        if (partial.isNotBlank()) {
                             Log.d("KateSpeech", "Partial: $partial")
-                    }
-                }
-                override fun onResult(hypothesis: String?) {
-                    hypothesis ?: return
-                    runCatching {
-                        val text = JSONObject(hypothesis).optString("text")
-                        if (text.isNotBlank()) {
-                            Log.d("KateSpeech", "✅ Result: $text")
-                            onResult(text)
                         }
                     }
                 }
-                override fun onFinalResult(hypothesis: String?) {
-                    hypothesis ?: return
-                    runCatching {
-                        val text = JSONObject(hypothesis).optString("text")
-                        if (text.isNotBlank()) {
-                            Log.d("KateSpeech", "Final: $text")
-                            onResult(text)
-                        }
-                    }
-                }
-                override fun onError(e: Exception?) {
-                    Log.e("KateSpeech", "Error: ${e?.message}")
-                    isListening = false
-                }
-                override fun onTimeout() {
-                    Log.d("KateSpeech", "Timeout")
-                    isListening = false
-                }
-            })
-            isListening = true
-            Log.d("KateSpeech", "🎤 VOSK listening started")
-        } catch (e: Exception) {
-            Log.e("KateSpeech", "Start failed: ${e.message}")
-            isListening = false
+            }
         }
+
+        thread?.start()
     }
 
     fun stopListening() {
-        try {
-            speechService?.stop()
-            speechService?.shutdown()
-            speechService = null
-            isListening   = false
-            Log.d("KateSpeech", "VOSK stopped")
-        } catch (e: Exception) {
-            Log.e("KateSpeech", "Stop error: ${e.message}")
-        }
+        isListening = false
+        audioRecord?.stop()
+        audioRecord?.release()
+        audioRecord = null
     }
-
-    fun isActive() = isListening
 }
