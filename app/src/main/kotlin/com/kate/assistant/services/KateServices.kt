@@ -27,36 +27,65 @@ class KateService : Service() {
 
         tts = KateTts(this)
 
-        speechManager = KateSpeechManager(this) { text ->
+        // ─────────────────────────────
+        // SPEECH ENGINE INIT (FIXED)
+        // ─────────────────────────────
+        speechManager = KateSpeechManager(
+            context = this,
 
-            when (text) {
+            // NORMAL SPEECH
+            onResult = { text ->
 
-                // 🔥 WAKE WORD EVENT
-                "WAKE_WORD" -> {
-                    Log.d("Kate", "Wake word detected")
+                when (text) {
 
-                    tts.speak("Yes?") {
-                        // switch back to idle listening
-                        speechManager.activateListening()
+                    "WAKE" -> {
+                        Log.d("Kate", "Wake word detected")
+
+                        speechManager.setSpeaking(true)
+
+                        tts.speak("Yes?")
+
+                        // resume listening safely
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            speechManager.setSpeaking(false)
+                            speechManager.activateListening()
+                        }, 900)
+                    }
+
+                    else -> {
+                        Log.d("Kate", "Command: $text")
+
+                        scope.launch(Dispatchers.Default) {
+                            handleVoiceCommand(text)
+                        }
                     }
                 }
+            },
 
-                // 🔥 NORMAL COMMAND FLOW
-                else -> {
-                    Log.d("Kate", "Command: $text")
+            // ─────────────────────────────
+            // PROACTIVE ENGINE (NEW FIX)
+            // ─────────────────────────────
+            onProactive = { suggestion ->
+                Log.d("Kate", "Proactive: $suggestion")
 
-                    scope.launch(Dispatchers.Default) {
-                        handleVoiceCommand(text)
-                    }
-                }
+                speechManager.setSpeaking(true)
+                tts.speak(suggestion)
+
+                Handler(Looper.getMainLooper()).postDelayed({
+                    speechManager.setSpeaking(false)
+                }, 1200)
             }
-        }
+        )
 
-        // 🔥 START ALWAYS-ON LISTENER
+        // START ENGINE
         speechManager.startListening()
 
-        // 🔥 BOOT SPEECH
+        speechManager.setSpeaking(true)
         tts.speak("Kate is online")
+
+        Handler(Looper.getMainLooper()).postDelayed({
+            speechManager.setSpeaking(false)
+        }, 1200)
     }
 
     // ─────────────────────────────
@@ -96,7 +125,13 @@ class KateService : Service() {
     // SAFE SPEAK WRAPPER
     // ─────────────────────────────
     private fun speak(text: String) {
+        speechManager.setSpeaking(true)
+
         tts.speak(text)
+
+        Handler(Looper.getMainLooper()).postDelayed({
+            speechManager.setSpeaking(false)
+        }, 1000)
     }
 
     // ─────────────────────────────
