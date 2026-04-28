@@ -1,3 +1,5 @@
+package com.kate.assistant.features.device
+
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -13,14 +15,12 @@ class KateHardwareController(private val context: Context) {
 
     fun kateHaptic() {
 
-        // 🔒 Permission check (required for lint + Android 12+ safety)
         val hasPermission = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.VIBRATE
         ) == PackageManager.PERMISSION_GRANTED
 
         if (!hasPermission) return
-
         if (!vibrator.hasVibrator()) return
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
