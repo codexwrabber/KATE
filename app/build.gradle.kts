@@ -99,4 +99,6 @@ dependencies {
     implementation(libs.lifecycle.runtime.ktx)
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.multidex:multidex:2.0.1")
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
 }
+
