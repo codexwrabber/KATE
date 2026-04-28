@@ -1,9 +1,7 @@
 package com.kate.assistant.features.voice
 
 import android.content.Context
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
+import android.media.*
 import android.os.Process
 import android.util.Log
 import org.json.JSONObject
@@ -11,60 +9,28 @@ import org.vosk.Model
 import org.vosk.Recognizer
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.random.Random
 
 class KateSpeechManager(
     private val context: Context,
     private val onResult: (String) -> Unit,
-    private val onProactive: (String) -> Unit
+    private val onProactive: ((String) -> Unit)? = null
 ) {
 
-    // ─────────────────────────────
-    // ENGINE CORE
-    // ─────────────────────────────
     private var model: Model? = null
     private var recognizer: Recognizer? = null
     private var audioRecord: AudioRecord? = null
     private var thread: Thread? = null
 
-    private val running = AtomicBoolean(false)
-
-    // ─────────────────────────────
-    // STATE MACHINE
-    // ─────────────────────────────
-    enum class Mode {
-        IDLE,
-        LISTENING,
-        SPEAKING
-    }
-
-    @Volatile
-    private var mode = Mode.IDLE
-
-    // ─────────────────────────────
-    // MEMORY SYSTEM (PROACTIVE CORE)
-    // ─────────────────────────────
-    private var lastCommand: String? = null
-    private var lastIntent: String? = null
-
-    private val commandHistory = mutableListOf<String>()
-
-    // ─────────────────────────────
-    // WAKE WORDS
-    // ─────────────────────────────
-    private val wakeWords = listOf(
-        "hey kate",
-        "kate",
-        "ok kate",
-        "hi kate"
-    )
+    private val isRunning = AtomicBoolean(false)
+    private val isSpeaking = AtomicBoolean(false)
+    private val wakeMode = AtomicBoolean(false)
 
     init {
         Thread { initModel() }.start()
     }
 
     // ─────────────────────────────
-    // LOAD MODEL
+    // MODEL LOAD
     // ─────────────────────────────
     private fun initModel() {
         try {
@@ -80,19 +46,21 @@ class KateSpeechManager(
 
             Log.d("KateSpeech", "Model ready")
         } catch (e: Exception) {
-            Log.e("KateSpeech", "Init error: ${e.message}")
+            Log.e("KateSpeech", "Model init failed: ${e.message}")
         }
     }
 
     // ─────────────────────────────
-    // START LISTENING LOOP
+    // START ALWAYS-ON LISTENER
     // ─────────────────────────────
     fun startListening() {
-        if (running.get()) return
-        if (recognizer == null) return
+        if (isRunning.get()) return
+        if (recognizer == null) {
+            Log.e("KateSpeech", "Recognizer not ready")
+            return
+        }
 
         val sampleRate = 16000
-
         val bufferSize = AudioRecord.getMinBufferSize(
             sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
@@ -100,7 +68,7 @@ class KateSpeechManager(
         )
 
         audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            MediaRecorder.AudioSource.MIC,
             sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
@@ -108,28 +76,48 @@ class KateSpeechManager(
         )
 
         audioRecord?.startRecording()
-        running.set(true)
+        isRunning.set(true)
 
         thread = Thread {
+
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
 
             val buffer = ByteArray(bufferSize)
 
-            Log.d("KateSpeech", "Proactive mode active")
+            Log.d("KateSpeech", "🎤 Always listening...")
 
-            while (running.get()) {
+            while (isRunning.get()) {
 
                 val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                 if (read <= 0) continue
 
-                val final = recognizer?.acceptWaveForm(buffer, read) ?: false
+                // 🔥 CRITICAL: IGNORE WHILE SPEAKING
+                if (isSpeaking.get()) continue
 
-                if (final) {
+                val result = recognizer?.acceptWaveForm(buffer, read) ?: false
+
+                if (result) {
+
                     val text = JSONObject(recognizer?.result ?: "{}")
                         .optString("text")
-                        .trim()
+                        .lowercase()
 
-                    if (text.isNotBlank()) handleSpeech(text)
+                    if (text.isNotBlank()) {
+                        handleResult(text)
+                    }
+                } else {
+
+                    val partial = JSONObject(recognizer?.partialResult ?: "{}")
+                        .optString("partial")
+                        .lowercase()
+
+                    // optional proactive trigger
+                    if (partial.contains("weather") ||
+                        partial.contains("remind") ||
+                        partial.contains("open")) {
+
+                        onProactive?.invoke("I'm listening...")
+                    }
                 }
             }
         }
@@ -138,135 +126,43 @@ class KateSpeechManager(
     }
 
     // ─────────────────────────────
-    // BRAIN CORE
+    // RESULT HANDLER
     // ─────────────────────────────
-    private fun handleSpeech(text: String) {
+    private fun handleResult(text: String) {
 
-        val input = text.lowercase().trim()
-
-        Log.d("KateSpeech", "Heard: $input | mode=$mode")
-
-        when (mode) {
-
-            Mode.IDLE -> {
-                if (isWakeWord(input)) {
-                    mode = Mode.LISTENING
-                    onResult("WAKE")
-                }
-            }
-
-            Mode.LISTENING -> {
-
-                val resolved = resolveContext(input)
-
-                lastCommand = resolved
-                commandHistory.add(resolved)
-
-                detectIntent(resolved)
-
-                onResult(resolved)
-
-                // 🔥 PROACTIVE ENGINE TRIGGER
-                runProactiveEngine()
-            }
-
-            Mode.SPEAKING -> {}
-        }
-    }
-
-    // ─────────────────────────────
-    // CONTEXT ENGINE
-    // ─────────────────────────────
-    private fun resolveContext(text: String): String {
-        return when {
-            text == "that" -> lastCommand ?: text
-            text.contains("again") -> lastCommand ?: text
-            text.contains("same") -> lastCommand ?: text
-            else -> text
-        }
-    }
-
-    // ─────────────────────────────
-    // INTENT DETECTION
-    // ─────────────────────────────
-    private fun detectIntent(text: String) {
-
-        lastIntent = when {
-            text.contains("open") -> "OPEN_APP"
-            text.contains("play") -> "MEDIA"
-            text.contains("call") -> "CALL"
-            text.contains("message") -> "MESSAGE"
-            else -> "GENERAL"
-        }
-    }
-
-    // ─────────────────────────────
-    // PROACTIVE ENGINE (🔥 MAIN UPGRADE)
-    // ─────────────────────────────
-    private fun runProactiveEngine() {
-
-        if (commandHistory.size < 2) return
-
-        val last = commandHistory.last()
-        val previous = commandHistory.dropLast(1).last()
-
-        var suggestion: String? = null
+        Log.d("KateSpeech", "Heard: $text")
 
         when {
 
-            // Pattern: user repeats same action
-            last == previous -> {
-                suggestion = "You just did this again. Want me to automate it next time?"
+            text.contains("hey kate") ||
+            text.contains("wake") -> {
+                wakeMode.set(true)
+                onResult("WAKE")
             }
 
-            // Pattern: app usage loop
-            last.contains("open") && previous.contains("open") -> {
-                suggestion = "You often open apps back to back. Want quick shortcuts?"
+            wakeMode.get() -> {
+                wakeMode.set(false)
+                onResult(text)
             }
 
-            // Pattern: media after launch
-            last.contains("open") && previous.contains("play") -> {
-                suggestion = "You usually play media after opening apps. Want auto-play mode?"
-            }
-
-            // Pattern: frequent repetition
-            commandHistory.takeLast(5).count { it == last } >= 3 -> {
-                suggestion = "You repeat this often. I can turn it into a shortcut."
+            else -> {
+                // ignore background noise until wake
             }
         }
-
-        if (suggestion != null) {
-            Log.d("KateSpeech", "Proactive: $suggestion")
-            onProactive(suggestion)
-        }
     }
 
     // ─────────────────────────────
-    // WAKE WORD CHECK
+    // TTS CONTROL (IMPORTANT FIX)
     // ─────────────────────────────
-    private fun isWakeWord(text: String): Boolean {
-        return wakeWords.any { text.startsWith(it) }
+    fun setSpeaking(state: Boolean) {
+        isSpeaking.set(state)
     }
 
     // ─────────────────────────────
-    // EXTERNAL CONTROL
+    // STOP
     // ─────────────────────────────
-    fun setSpeaking(active: Boolean) {
-        mode = if (active) Mode.SPEAKING else Mode.IDLE
-    }
-
-    fun activateListening() {
-        mode = Mode.IDLE
-    }
-
-    fun resetMemory() {
-        lastCommand = null
-        lastIntent = null
-        commandHistory.clear()
-    }
-
     fun stopListening() {
-        running.set(false)
+        isRunning.set(false)
 
         try {
             audioRecord?.stop()
