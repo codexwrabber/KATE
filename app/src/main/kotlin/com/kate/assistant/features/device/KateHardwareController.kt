@@ -1,39 +1,38 @@
-package com.kate.assistant.features.device
-
-import android.app.NotificationManager
+import android.Manifest
 import android.content.Context
-import android.hardware.camera2.CameraManager
-import android.media.AudioManager
-import android.os.*
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import androidx.core.content.ContextCompat
 
 class KateHardwareController(private val context: Context) {
-    private val cameraManager = context.getSystemService(CameraManager::class.java)
-    private val audioManager  = context.getSystemService(AudioManager::class.java)
-    private val vibrator      = context.getSystemService(Vibrator::class.java)
-    private val notifManager  = context.getSystemService(NotificationManager::class.java)
-    private val cameraId      = runCatching { cameraManager.cameraIdList[0] }.getOrNull()
 
-    fun torch(on: Boolean) {
-        cameraId?.let { runCatching { cameraManager.setTorchMode(it, on) } }
-    }
-    fun torchOn()    = torch(true)
-    fun torchOff()   = torch(false)
+    private val vibrator =
+        context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
 
-    fun volumeUp()   = audioManager.adjustVolume(AudioManager.ADJUST_RAISE,  AudioManager.FLAG_SHOW_UI)
-    fun volumeDown() = audioManager.adjustVolume(AudioManager.ADJUST_LOWER,  AudioManager.FLAG_SHOW_UI)
-    fun muteAll()    = audioManager.adjustVolume(AudioManager.ADJUST_MUTE,   AudioManager.FLAG_SHOW_UI)
-    fun unmuteAll()  = audioManager.adjustVolume(AudioManager.ADJUST_UNMUTE, AudioManager.FLAG_SHOW_UI)
+    fun kateHaptic() {
 
-    fun kateHaptic() = vibrator.vibrate(
-        VibrationEffect.createWaveform(longArrayOf(0L, 80L, 60L, 80L), -1)
-    )
+        // 🔒 Permission check (required for lint + Android 12+ safety)
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.VIBRATE
+        ) == PackageManager.PERMISSION_GRANTED
 
-    fun setDND(on: Boolean) {
-        if (notifManager.isNotificationPolicyAccessGranted) {
-            notifManager.setInterruptionFilter(
-                if (on) NotificationManager.INTERRUPTION_FILTER_NONE
-                else    NotificationManager.INTERRUPTION_FILTER_ALL
+        if (!hasPermission) return
+
+        if (!vibrator.hasVibrator()) return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            vibrator.vibrate(
+                VibrationEffect.createOneShot(
+                    60,
+                    VibrationEffect.DEFAULT_AMPLITUDE
+                )
             )
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(60)
         }
     }
 }
