@@ -67,7 +67,6 @@ class KateService : Service() {
             db                = KateDatabase.getDatabase(this)
             habitDao          = db.habitDao()
 
-            // VOSK speech manager — fully offline
             speechManager = KateSpeechManager(this) { text ->
                 Log.d("Kate", "VOSK heard: $text")
                 KateEventBus.emit(KateEvent.Error("Heard: $text"))
@@ -104,7 +103,6 @@ class KateService : Service() {
 
             bridge.startAudio()
 
-            // Start VOSK after greeting
             mainHandler.postDelayed({
                 tts.speak("Kate is ready.")
                 mainHandler.postDelayed({
@@ -135,7 +133,7 @@ class KateService : Service() {
                 launcher.launchByVoiceCommand(appName)
             }
 
-            // ── Music / Media ─────────────────────────────────
+            // ── Music / Media ────────────────────────────────
             lower.contains("play music") ||
             lower.contains("play songs") ||
             lower.contains("music") -> {
@@ -157,12 +155,15 @@ class KateService : Service() {
             lower.contains("youtube") -> {
                 val query = lower.replace("youtube", "").trim()
                 tts.speak("Opening YouTube")
-                launcher.search(query, com.kate.assistant.features.launcher.SearchEngine.YOUTUBE)
+                launcher.search(
+                    query,
+                    com.kate.assistant.features.launcher.SearchEngine.YOUTUBE
+                )
             }
 
             // ── Phone calls ───────────────────────────────────
             lower.contains("call ") -> {
-                val name = lower.substringAfter("call").trim()
+                val name   = lower.substringAfter("call").trim()
                 val number = lookupContact(name)
                 if (number != null) {
                     tts.speak("Calling $name")
@@ -182,7 +183,7 @@ class KateService : Service() {
             lower.contains("send message to") ||
             lower.contains("text ") ||
             lower.contains("sms ") -> {
-                val parts  = lower
+                val parts   = lower
                     .replace("send message to", "")
                     .replace("text", "")
                     .replace("sms", "")
@@ -190,8 +191,8 @@ class KateService : Service() {
                     .split(" saying ")
                 val name    = parts.getOrNull(0)?.trim() ?: ""
                 val message = parts.getOrNull(1)?.trim() ?: ""
-                if (name.isBlank()) { tts.speak("Who should I message?"); return }
-                if (message.isBlank()) { tts.speak("What should I say?"); return }
+                if (name.isBlank())    { tts.speak("Who should I message?"); return }
+                if (message.isBlank()) { tts.speak("What should I say?");    return }
                 val number = lookupContact(name)
                 if (number != null) {
                     sendSms(number, message)
@@ -279,61 +280,66 @@ class KateService : Service() {
 
             // ── Time / Date ───────────────────────────────────
             lower.contains("what time") -> {
-                val time = java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault())
-                    .format(java.util.Date())
+                val time = java.text.SimpleDateFormat(
+                    "h:mm a", java.util.Locale.getDefault()
+                ).format(java.util.Date())
                 tts.speak("It is $time")
             }
 
             lower.contains("what date") ||
             lower.contains("today's date") -> {
-                val date = java.text.SimpleDateFormat("MMMM d, yyyy", java.util.Locale.getDefault())
-                    .format(java.util.Date())
+                val date = java.text.SimpleDateFormat(
+                    "MMMM d, yyyy", java.util.Locale.getDefault()
+                ).format(java.util.Date())
                 tts.speak("Today is $date")
             }
 
-            // ── Accessibility actions ─────────────────────────────
-lower.contains("go back") -> {
-    KateAccessibilityService.instance?.goBack()
-    tts.speak("Going back")
-}
+            // ── Accessibility ─────────────────────────────────
+            lower.contains("go back") -> {
+                KateAccessibilityService.instance?.goBack()
+                tts.speak("Going back")
+            }
 
-lower.contains("go home") -> {
-    KateAccessibilityService.instance?.goHome()
-    tts.speak("Going home")
-}
+            lower.contains("go home") -> {
+                KateAccessibilityService.instance?.goHome()
+                tts.speak("Going home")
+            }
 
-lower.contains("show notifications") ||
-lower.contains("open notifications") -> {
-    KateAccessibilityService.instance?.showNotifications()
-    tts.speak("Opening notifications")
-}
+            lower.contains("show notifications") ||
+            lower.contains("open notifications") -> {
+                KateAccessibilityService.instance?.showNotifications()
+                tts.speak("Opening notifications")
+            }
 
-lower.contains("take screenshot") -> {
-    KateAccessibilityService.instance?.takeScreenshot()
-    tts.speak("Screenshot taken")
-}
+            lower.contains("take screenshot") -> {
+                KateAccessibilityService.instance?.takeScreenshot()
+                tts.speak("Screenshot taken")
+            }
 
-lower.contains("recent apps") ||
-lower.contains("show recents") -> {
-    KateAccessibilityService.instance?.openRecents()
-    tts.speak("Recent apps")
-}
+            lower.contains("recent apps") ||
+            lower.contains("show recents") -> {
+                KateAccessibilityService.instance?.openRecents()
+                tts.speak("Recent apps")
+            }
 
-lower.contains("type ") ||
-lower.contains("write ") -> {
-    val text = lower
-        .replace("type", "")
-        .replace("write", "")
-        .trim()
-    val ok = KateAccessibilityService.instance?.ghostType(text) ?: false
-    tts.speak(if (ok) "Typed" else "Nothing to type into")
-}
+            lower.contains("type ") ||
+            lower.contains("write ") -> {
+                val typing = lower
+                    .replace("type", "")
+                    .replace("write", "")
+                    .trim()
+                val ok = KateAccessibilityService.instance?.ghostType(typing) ?: false
+                tts.speak(if (ok) "Typed" else "Nothing to type into")
+            }
 
-lower.contains("read screen") ||
-lower.contains("what's on screen") -> {
-    val screen = KateAccessibilityService.instance?.readScreen() ?: ""
-    tts.speak(if (screen.isNotBlank()) screen.take(200) else "Nothing on screen")
-}
+            lower.contains("read screen") ||
+            lower.contains("what's on screen") -> {
+                val screen = KateAccessibilityService.instance?.readScreen() ?: ""
+                tts.speak(
+                    if (screen.isNotBlank()) screen.take(200)
+                    else "Nothing on screen"
+                )
+            }
 
             // ── Stop ──────────────────────────────────────────
             lower.contains("stop listening") ||
@@ -343,10 +349,31 @@ lower.contains("what's on screen") -> {
                 speechManager.stopListening()
             }
 
-            // ── Unknown ───────────────────────────────────────
+            // ── Unknown — TFLite fallback ─────────────────────
             else -> {
                 if (lower.isNotBlank()) {
-                    tts.speak("You said $text. I'm still learning.")
+                    // Try TFLite classifier before giving up
+                    scope.launch(Dispatchers.IO) {
+                        val intent = try {
+                            intentClassifier.classify(text)
+                        } catch (e: Exception) {
+                            "UNKNOWN"
+                        }
+                        Log.d("Kate", "TFLite classified: $intent")
+                        withContext(Dispatchers.Main) {
+                            when (intent) {
+                                "OPEN_APP"       -> tts.speak("Which app should I open?")
+                                "MEDIA_CONTROL"  -> {
+                                    tts.speak("Opening music")
+                                    launcher.openMusicApp()
+                                }
+                                "COMMUNICATION"  -> tts.speak("Who should I contact?")
+                                "REMINDER"       -> tts.speak("What should I remind you about?")
+                                "SYSTEM_CONTROL" -> tts.speak("What system setting?")
+                                else             -> tts.speak("You said $text. I am still learning.")
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -357,16 +384,21 @@ lower.contains("what's on screen") -> {
         return try {
             val cursor = contentResolver.query(
                 ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER,
-                        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME),
+                arrayOf(
+                    ContactsContract.CommonDataKinds.Phone.NUMBER,
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+                ),
                 "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
                 arrayOf("%$name%"),
                 null
             )
             cursor?.use {
                 if (it.moveToFirst()) {
-                    it.getString(it.getColumnIndexOrThrow(
-                        ContactsContract.CommonDataKinds.Phone.NUMBER))
+                    it.getString(
+                        it.getColumnIndexOrThrow(
+                            ContactsContract.CommonDataKinds.Phone.NUMBER
+                        )
+                    )
                 } else null
             }
         } catch (e: Exception) {
@@ -390,7 +422,8 @@ lower.contains("what's on screen") -> {
     // ── Send SMS ─────────────────────────────────────────────
     private fun sendSms(number: String, message: String) {
         try {
-            SmsManager.getDefault().sendTextMessage(number, null, message, null, null)
+            SmsManager.getDefault()
+                .sendTextMessage(number, null, message, null, null)
         } catch (e: Exception) {
             tts.speak("I couldn't send the message")
             Log.e("Kate", "SMS failed: ${e.message}")
@@ -402,6 +435,7 @@ lower.contains("what's on screen") -> {
     override fun onDestroy() {
         speechManager.stopListening()
         bridge.stopAudio()
+        intentClassifier.close()
         scope.cancel()
         super.onDestroy()
     }
@@ -437,12 +471,14 @@ lower.contains("what's on screen") -> {
         scope.launch {
             val key      = "${event.intent}_${event.entity}"
             val existing = habitDao.getAll().find { it.key == key }
-            habitDao.insert(HabitEntity(
-                key    = key,
-                intent = event.intent,
-                entity = event.entity,
-                count  = (existing?.count ?: 0) + 1
-            ))
+            habitDao.insert(
+                HabitEntity(
+                    key    = key,
+                    intent = event.intent,
+                    entity = event.entity,
+                    count  = (existing?.count ?: 0) + 1
+                )
+            )
         }
     }
 
@@ -453,7 +489,10 @@ lower.contains("what's on screen") -> {
 
     private fun startForegroundServiceSafe() {
         val channel = NotificationChannel(
-            CHANNEL_ID, "Kate Assistant", NotificationManager.IMPORTANCE_LOW)
+            CHANNEL_ID,
+            "Kate Assistant",
+            NotificationManager.IMPORTANCE_LOW
+        )
         getSystemService(NotificationManager::class.java)
             .createNotificationChannel(channel)
 
@@ -466,8 +505,11 @@ lower.contains("what's on screen") -> {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
