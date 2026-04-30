@@ -1,11 +1,9 @@
 package com.kate.assistant.features.device
 
 import android.Manifest
-import android.content.ContentResolver
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioManager
-import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -52,14 +50,8 @@ class KateHardwareController(private val context: Context) {
                     true
                 } else false
             } else {
-                @Suppress("DEPRECATION")
-                context.applicationContext?.contentResolver?.let { resolver ->
-                    Settings.System.putInt(
-                        resolver,
-                        Settings.System.FLASHLIGHT_TOGGLE, 1
-                    )
-                }
-                true
+                // For older Android versions, torch control is not reliably available
+                false
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -77,33 +69,12 @@ class KateHardwareController(private val context: Context) {
                     true
                 } else false
             } else {
-                @Suppress("DEPRECATION")
-                context.applicationContext?.contentResolver?.let { resolver ->
-                    Settings.System.putInt(
-                        resolver,
-                        Settings.System.FLASHLIGHT_TOGGLE, 0
-                    )
-                }
-                true
+                false
             }
         } catch (e: Exception) {
             e.printStackTrace()
             false
         }
-    }
-
-    fun isTorchOn(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            try {
-                val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
-                val cameraId = cameraManager.cameraIdList.firstOrNull()
-                cameraId?.let { cameraManager.getCameraCharacteristics(it) }?.get(
-                    android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE
-                ) ?: false
-            } catch (e: Exception) {
-                false
-            }
-        } else false
     }
 
     // ─────────────────────────────
@@ -135,34 +106,22 @@ class KateHardwareController(private val context: Context) {
         )
     }
 
-    fun getCurrentVolume(): Int {
-        return audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-    }
-
-    fun getMaxVolume(): Int {
-        return audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-    }
-
     fun muteAll() {
-        // Mute media volume
         audioManager.setStreamVolume(
             AudioManager.STREAM_MUSIC,
             0,
             AudioManager.FLAG_SHOW_UI
         )
-        // Mute alarm volume
         audioManager.setStreamVolume(
             AudioManager.STREAM_ALARM,
             0,
             AudioManager.FLAG_SHOW_UI
         )
-        // Mute notification volume
         audioManager.setStreamVolume(
             AudioManager.STREAM_NOTIFICATION,
             0,
             AudioManager.FLAG_SHOW_UI
         )
-        // Mute ring volume
         audioManager.setStreamVolume(
             AudioManager.STREAM_RING,
             0,
@@ -171,7 +130,6 @@ class KateHardwareController(private val context: Context) {
     }
 
     fun unmuteAll() {
-        // Restore to reasonable levels
         val mediaMax = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         audioManager.setStreamVolume(
             AudioManager.STREAM_MUSIC,
@@ -194,10 +152,6 @@ class KateHardwareController(private val context: Context) {
         )
     }
 
-    fun isMuted(): Boolean {
-        return audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) == 0
-    }
-
     // ─────────────────────────────
     // DO NOT DISTURB (DND) MODE
     // ─────────────────────────────
@@ -207,28 +161,20 @@ class KateHardwareController(private val context: Context) {
                 val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
                 
                 if (enabled) {
-                    // Check if we have permission to modify DND
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        if (notificationManager.isNotificationPolicyAccessGranted) {
-                            notificationManager.setInterruptionFilter(
-                                android.app.NotificationManager.INTERRUPTION_FILTER_PRIORITY
-                            )
-                            true
-                        } else {
-                            // Request permission (caller should handle)
-                            false
-                        }
+                    if (notificationManager.isNotificationPolicyAccessGranted) {
+                        notificationManager.setInterruptionFilter(
+                            android.app.NotificationManager.INTERRUPTION_FILTER_PRIORITY
+                        )
+                        true
                     } else {
                         false
                     }
                 } else {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        if (notificationManager.isNotificationPolicyAccessGranted) {
-                            notificationManager.setInterruptionFilter(
-                                android.app.NotificationManager.INTERRUPTION_FILTER_ALL
-                            )
-                            true
-                        } else false
+                    if (notificationManager.isNotificationPolicyAccessGranted) {
+                        notificationManager.setInterruptionFilter(
+                            android.app.NotificationManager.INTERRUPTION_FILTER_ALL
+                        )
+                        true
                     } else false
                 }
             } catch (e: Exception) {
@@ -236,25 +182,8 @@ class KateHardwareController(private val context: Context) {
                 false
             }
         } else {
-            // For older Android versions, use deprecated method
-            try {
-                val settingsUri = if (enabled) {
-                    Settings.Global.putString(
-                        context.contentResolver,
-                        Settings.Global.ZEN_MODE,
-                        Settings.Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS.toString()
-                    )
-                } else {
-                    Settings.Global.putString(
-                        context.contentResolver,
-                        Settings.Global.ZEN_MODE,
-                        Settings.Global.ZEN_MODE_OFF.toString()
-                    )
-                }
-                true
-            } catch (e: Exception) {
-                false
-            }
+            // For older Android versions, DND not available
+            false
         }
     }
 
@@ -268,72 +197,5 @@ class KateHardwareController(private val context: Context) {
                 false
             }
         } else false
-    }
-
-    // ─────────────────────────────
-    // BRIGHTNESS CONTROL (BONUS)
-    // ─────────────────────────────
-    fun setBrightness(level: Int) {
-        val brightness = level.coerceIn(0, 255)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            Settings.System.putInt(
-                context.contentResolver,
-                Settings.System.SCREEN_BRIGHTNESS,
-                brightness
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            Settings.System.putInt(
-                context.contentResolver,
-                Settings.System.SCREEN_BRIGHTNESS,
-                brightness
-            )
-        }
-    }
-
-    fun getCurrentBrightness(): Int {
-        return Settings.System.getInt(
-            context.contentResolver,
-            Settings.System.SCREEN_BRIGHTNESS,
-            125
-        )
-    }
-
-    fun brightnessUp() {
-        val current = getCurrentBrightness()
-        val newValue = (current + 25).coerceAtMost(255)
-        setBrightness(newValue)
-    }
-
-    fun brightnessDown() {
-        val current = getCurrentBrightness()
-        val newValue = (current - 25).coerceAtLeast(0)
-        setBrightness(newValue)
-    }
-
-    // ─────────────────────────────
-    // RINGER MODE
-    // ─────────────────────────────
-    fun setRingerMode(mode: Int) {
-        // mode: AudioManager.RINGER_MODE_NORMAL, RINGER_MODE_SILENT, RINGER_MODE_VIBRATE
-        audioManager.ringerMode = mode
-    }
-
-    fun getRingerMode(): Int {
-        return audioManager.ringerMode
-    }
-
-    fun silentMode(enabled: Boolean) {
-        if (enabled) {
-            audioManager.ringerMode = AudioManager.RINGER_MODE_SILENT
-        } else {
-            audioManager.ringerMode = AudioManager.RINGER_MODE_NORMAL
-        }
-    }
-
-    fun vibrateMode(enabled: Boolean) {
-        if (enabled) {
-            audioManager.ringerMode = AudioManager.RINGER_MODE_VIBRATE
-        }
     }
 }
