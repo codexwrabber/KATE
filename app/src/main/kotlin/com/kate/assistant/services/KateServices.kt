@@ -17,6 +17,7 @@ import com.kate.assistant.data.db.KateDatabase
 import com.kate.assistant.features.device.KateDeviceController
 import com.kate.assistant.features.device.KateHardwareController
 import com.kate.assistant.features.launcher.KateAppLauncher
+import com.kate.assistant.features.launcher.SearchEngine
 import com.kate.assistant.features.nlp.IntentClassifier
 import com.kate.assistant.features.nlp.LabelMapper
 import com.kate.assistant.features.nlp.TextVectorizer
@@ -176,7 +177,7 @@ class KateService : Service() {
                 speak("Opening YouTube")
                 launcher.search(
                     query,
-                    com.kate.assistant.features.launcher.SearchEngine.YOUTUBE
+                    SearchEngine.YOUTUBE
                 )
             }
 
@@ -489,7 +490,7 @@ class KateService : Service() {
             startForeground(
                 NOTIFICATION_ID,
                 notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             )
         } else {
             startForeground(NOTIFICATION_ID, notification)
