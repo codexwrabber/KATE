@@ -13,13 +13,10 @@ import org.vosk.Recognizer
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
-typealias SpeechResultCallback = (String) -> Unit
-typealias SpeechErrorCallback = (String) -> Unit
-
 class KateSpeechManager(
     private val context: Context,
-    private val onResult: SpeechResultCallback,
-    private val onError: SpeechErrorCallback? = null
+    private val onResult: (String) -> Unit,
+    private val onError: ((String) -> Unit)? = null
 ) {
 
     private var model: Model? = null
@@ -30,18 +27,6 @@ class KateSpeechManager(
     private val isRunning = AtomicBoolean(false)
     private val isSpeaking = AtomicBoolean(false)
     private val wakeMode = AtomicBoolean(false)
-
-    // Optional proactive callback for backward compatibility
-    private var onProactive: ((String) -> Unit)? = null
-
-    // Secondary constructor for backward compatibility
-    constructor(
-        context: Context,
-        onResult: (String) -> Unit,
-        onProactive: ((String) -> Unit)?
-    ) : this(context, onResult, null) {
-        this.onProactive = onProactive
-    }
 
     init {
         Thread { initModel() }.start()
@@ -55,7 +40,7 @@ class KateSpeechManager(
             val modelDir = File(context.filesDir, "vosk-model")
 
             if (!modelDir.exists()) {
-                val error = "❌ Model not found at ${modelDir.absolutePath}"
+                val error = "Model not found at ${modelDir.absolutePath}"
                 Log.e("KateSpeech", error)
                 onError?.invoke(error)
                 return
@@ -64,16 +49,16 @@ class KateSpeechManager(
             model = Model(modelDir.absolutePath)
             recognizer = Recognizer(model, 16000.0f)
 
-            Log.d("KateSpeech", "✅ Model loaded")
+            Log.d("KateSpeech", "Model loaded")
         } catch (e: Exception) {
-            val error = "❌ Model init failed: ${e.message}"
+            val error = "Model init failed: ${e.message}"
             Log.e("KateSpeech", error)
             onError?.invoke(error)
         }
     }
 
     // ─────────────────────────────
-    // START LISTENING (AUTO RECOVERY)
+    // START LISTENING
     // ─────────────────────────────
     fun startListening() {
         if (isRunning.get()) {
@@ -81,21 +66,20 @@ class KateSpeechManager(
             return
         }
 
-        // 🔒 Permission check
         val permission = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.RECORD_AUDIO
         )
 
         if (permission != PackageManager.PERMISSION_GRANTED) {
-            val error = "❌ RECORD_AUDIO not granted"
+            val error = "RECORD_AUDIO not granted"
             Log.e("KateSpeech", error)
             onError?.invoke(error)
             return
         }
 
         if (recognizer == null) {
-            val error = "❌ Recognizer not ready"
+            val error = "Recognizer not ready"
             Log.e("KateSpeech", error)
             onError?.invoke(error)
             return
@@ -109,7 +93,7 @@ class KateSpeechManager(
         )
 
         if (bufferSize == AudioRecord.ERROR_BAD_VALUE || bufferSize == AudioRecord.ERROR) {
-            val error = "❌ Invalid buffer size"
+            val error = "Invalid buffer size"
             Log.e("KateSpeech", error)
             onError?.invoke(error)
             return
@@ -124,7 +108,7 @@ class KateSpeechManager(
         )
 
         if (record.state != AudioRecord.STATE_INITIALIZED) {
-            val error = "❌ AudioRecord init failed"
+            val error = "AudioRecord init failed"
             Log.e("KateSpeech", error)
             onError?.invoke(error)
             return
@@ -134,9 +118,9 @@ class KateSpeechManager(
 
         try {
             audioRecord?.startRecording()
-            Log.d("KateSpeech", "🎤 Mic started")
+            Log.d("KateSpeech", "Mic started")
         } catch (e: Exception) {
-            val error = "❌ Mic start failed: ${e.message}"
+            val error = "Mic start failed: ${e.message}"
             Log.e("KateSpeech", error)
             onError?.invoke(error)
             return
@@ -147,12 +131,12 @@ class KateSpeechManager(
         thread = Thread {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             val buffer = ByteArray(bufferSize)
-            Log.d("KateSpeech", "🚀 Listening loop started")
+            Log.d("KateSpeech", "Listening loop started")
 
             while (isRunning.get()) {
                 try {
                     if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                        Log.e("KateSpeech", "⚠️ Mic stopped — recovering...")
+                        Log.e("KateSpeech", "Mic stopped - recovering...")
                         recoverMic()
                         continue
                     }
@@ -179,13 +163,13 @@ class KateSpeechManager(
                             .lowercase()
                             .trim()
 
-                        if (partial.contains("hey kate") || partial.contains("hey kate ")) {
-                            Log.d("KateSpeech", "Wake word detected in partial: $partial")
+                        if (partial.contains("hey kate")) {
+                            Log.d("KateSpeech", "Wake word detected: $partial")
                             onResult("WAKE")
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e("KateSpeech", "🔥 Loop crash: ${e.message}")
+                    Log.e("KateSpeech", "Loop crash: ${e.message}")
                     onError?.invoke("Loop crash: ${e.message}")
                     recoverMic()
                 }
@@ -195,18 +179,12 @@ class KateSpeechManager(
         thread?.start()
     }
 
-    // ─────────────────────────────
-    // AUTO RECOVERY
-    // ─────────────────────────────
     private fun recoverMic() {
         stopListening()
         Thread.sleep(500)
         startListening()
     }
 
-    // ─────────────────────────────
-    // RESULT HANDLER
-    // ─────────────────────────────
     private fun handleResult(text: String) {
         Log.d("KateSpeech", "Heard: $text")
 
@@ -215,14 +193,11 @@ class KateSpeechManager(
                 wakeMode.set(true)
                 onResult("WAKE")
             }
-
             wakeMode.get() -> {
                 wakeMode.set(false)
                 onResult(text)
             }
-            
             else -> {
-                // If not in wake mode but we got a result, maybe it's a direct command
                 if (text.isNotBlank() && text.length > 3) {
                     onResult(text)
                 }
@@ -230,24 +205,15 @@ class KateSpeechManager(
         }
     }
 
-    // ─────────────────────────────
-    // SPEAKING CONTROL
-    // ─────────────────────────────
     fun setSpeaking(state: Boolean) {
         isSpeaking.set(state)
         Log.d("KateSpeech", "Speaking mode: $state")
     }
 
-    // ─────────────────────────────
-    // CHECK STATUS
-    // ─────────────────────────────
     fun isListening(): Boolean = isRunning.get()
     
     fun isSpeaking(): Boolean = isSpeaking.get()
 
-    // ─────────────────────────────
-    // STOP
-    // ─────────────────────────────
     fun stopListening() {
         Log.d("KateSpeech", "Stopping listening...")
         isRunning.set(false)
@@ -265,7 +231,6 @@ class KateSpeechManager(
         try {
             thread?.join(1000)
         } catch (e: InterruptedException) {
-            Log.e("KateSpeech", "Thread join interrupted")
             thread?.interrupt()
         }
         
@@ -273,16 +238,13 @@ class KateSpeechManager(
         Log.d("KateSpeech", "Listening stopped")
     }
 
-    // ─────────────────────────────
-    // CLEANUP
-    // ─────────────────────────────
     fun shutdown() {
         stopListening()
         try {
             recognizer?.close()
             model?.close()
         } catch (e: Exception) {
-            Log.e("KateSpeech", "Error closing recognizer/model: ${e.message}")
+            Log.e("KateSpeech", "Error closing: ${e.message}")
         }
         recognizer = null
         model = null
