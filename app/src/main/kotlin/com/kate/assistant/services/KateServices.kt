@@ -45,11 +45,11 @@ class KateService : Service() {
     private lateinit var vectorizer: TextVectorizer
     private lateinit var labelMapper: LabelMapper
 
-    private val scope       = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val mainHandler = Handler(Looper.getMainLooper())
 
     companion object {
-        private const val CHANNEL_ID      = "kate_service_channel"
+        private const val CHANNEL_ID = "kate_service_channel"
         private const val NOTIFICATION_ID = 1
     }
 
@@ -58,23 +58,30 @@ class KateService : Service() {
         startForegroundServiceSafe()
 
         try {
-            bridge            = KateBridge(this)
-            tts               = KateTts(this)
-            deviceController  = KateDeviceController(this)
-            hardware          = KateHardwareController(this)
-            launcher          = KateAppLauncher(this)
+            bridge = KateBridge(this)
+            tts = KateTts(this)
+            deviceController = KateDeviceController(this)
+            hardware = KateHardwareController(this)
+            launcher = KateAppLauncher(this)
             reminderScheduler = ReminderScheduler(this)
-            phantomJournal    = PhantomJournal(this)
-            proactiveEngine   = ProactiveEngine(this)
-            intentClassifier  = IntentClassifier(this)
-            vectorizer        = TextVectorizer()
-            labelMapper       = LabelMapper(this)
-            db                = KateDatabase.getDatabase(this)
-            habitDao          = db.habitDao()
+            phantomJournal = PhantomJournal(this)
+            proactiveEngine = ProactiveEngine(this)
+            intentClassifier = IntentClassifier(this)
+            vectorizer = TextVectorizer()
+            labelMapper = LabelMapper(this)
+            db = KateDatabase.getDatabase(this)
+            habitDao = db.habitDao()
 
-            speechManager = KateSpeechManager(this) { text ->
-                handleSpeech(text)
-            }
+            // Fixed: KateSpeechManager initialization with proper parameters
+            speechManager = KateSpeechManager(
+                context = this,
+                onResult = { text ->
+                    handleSpeech(text)
+                },
+                onError = { error ->
+                    Log.e("Kate", "Speech recognition error: $error")
+                }
+            )
 
             bridge.updateAppList(loadInstalledApps())
 
@@ -88,13 +95,13 @@ class KateService : Service() {
             KateEventBus.subscribe { event ->
                 when (event) {
                     is KateEvent.WakeWordDetected -> Log.d("Kate", "Wake word!")
-                    is KateEvent.HabitUpdate      -> persistHabit(event)
-                    is KateEvent.AppOpened        -> {
+                    is KateEvent.HabitUpdate -> persistHabit(event)
+                    is KateEvent.AppOpened -> {
                         phantomJournal.logAppOpen(event.packageName)
                         proactiveEngine.evaluate()
                     }
                     is KateEvent.Error -> Log.d("Kate", event.message)
-                    else               -> Unit
+                    else -> Unit
                 }
             }
 
@@ -148,7 +155,10 @@ class KateService : Service() {
                     .replace("open", "")
                     .replace("launch", "")
                     .trim()
-                if (appName.isBlank()) { speak("Which app?"); return }
+                if (appName.isBlank()) {
+                    speak("Which app?")
+                    return
+                }
                 speak("Opening $appName")
                 launcher.launchByVoiceCommand(appName)
             }
@@ -183,7 +193,7 @@ class KateService : Service() {
 
             // ── Calls ─────────────────────────────────────────
             lower.contains("call ") -> {
-                val name   = lower.substringAfter("call").trim()
+                val name = lower.substringAfter("call").trim()
                 val number = lookupContact(name)
                 if (number != null) {
                     speak("Calling $name", 800)
@@ -203,16 +213,22 @@ class KateService : Service() {
             lower.contains("send message to") ||
             lower.contains("text ") ||
             lower.contains("sms ") -> {
-                val parts   = lower
+                val parts = lower
                     .replace("send message to", "")
                     .replace("text", "")
                     .replace("sms", "")
                     .trim()
                     .split(" saying ")
-                val name    = parts.getOrNull(0)?.trim() ?: ""
+                val name = parts.getOrNull(0)?.trim() ?: ""
                 val message = parts.getOrNull(1)?.trim() ?: ""
-                if (name.isBlank())    { speak("Who should I message?"); return }
-                if (message.isBlank()) { speak("What should I say?");    return }
+                if (name.isBlank()) {
+                    speak("Who should I message?")
+                    return
+                }
+                if (message.isBlank()) {
+                    speak("What should I say?")
+                    return
+                }
                 val number = lookupContact(name)
                 if (number != null) {
                     sendSms(number, message)
@@ -227,16 +243,22 @@ class KateService : Service() {
             lower.contains("flashlight on") ||
             lower.contains("turn on torch") ||
             lower.contains("turn on flashlight") -> {
-                hardware.torchOn()
-                speak("Flashlight on")
+                if (hardware.torchOn()) {
+                    speak("Flashlight on")
+                } else {
+                    speak("Couldn't turn on flashlight")
+                }
             }
 
             lower.contains("torch off") ||
             lower.contains("flashlight off") ||
             lower.contains("turn off torch") ||
             lower.contains("turn off flashlight") -> {
-                hardware.torchOff()
-                speak("Flashlight off")
+                if (hardware.torchOff()) {
+                    speak("Flashlight off")
+                } else {
+                    speak("Couldn't turn off flashlight")
+                }
             }
 
             // ── Volume ────────────────────────────────────────
@@ -261,13 +283,19 @@ class KateService : Service() {
             // ── DND ───────────────────────────────────────────
             lower.contains("do not disturb on") ||
             lower.contains("silence") -> {
-                hardware.setDND(true)
-                speak("Do not disturb enabled")
+                if (hardware.setDND(true)) {
+                    speak("Do not disturb enabled")
+                } else {
+                    speak("Cannot enable DND. Please grant notification policy access.")
+                }
             }
 
             lower.contains("do not disturb off") -> {
-                hardware.setDND(false)
-                speak("Do not disturb disabled")
+                if (hardware.setDND(false)) {
+                    speak("Do not disturb disabled")
+                } else {
+                    speak("Cannot disable DND. Please grant notification policy access.")
+                }
             }
 
             // ── Reminders ─────────────────────────────────────
@@ -380,19 +408,25 @@ class KateService : Service() {
                     }
                     Log.d("Kate", "TFLite: $intent")
                     when (intent) {
-                        "OPEN_APP"       -> speak("Which app should I open?")
-                        "MEDIA_CONTROL"  -> { speak("Opening music"); launcher.openMusicApp() }
-                        "COMMUNICATION"  -> speak("Who should I contact?")
-                        "REMINDER"       -> speak("What should I remind you about?")
+                        "OPEN_APP" -> speak("Which app should I open?")
+                        "MEDIA_CONTROL" -> {
+                            speak("Opening music")
+                            launcher.openMusicApp()
+                        }
+                        "COMMUNICATION" -> speak("Who should I contact?")
+                        "REMINDER" -> speak("What should I remind you about?")
                         "SYSTEM_CONTROL" -> speak("What system setting?")
-                        else             -> speak("You said $text. I am still learning.")
+                        else -> speak("You said $text. I am still learning.")
                     }
                 }
             }
         }
 
         // Log habit
-        try { bridge.processText(text) } catch (e: Exception) { }
+        try {
+            bridge.processText(text)
+        } catch (e: Exception) {
+        }
     }
 
     // ── Contact lookup ───────────────────────────────────────
@@ -411,7 +445,8 @@ class KateService : Service() {
             cursor?.use {
                 if (it.moveToFirst())
                     it.getString(it.getColumnIndexOrThrow(
-                        ContactsContract.CommonDataKinds.Phone.NUMBER))
+                        ContactsContract.CommonDataKinds.Phone.NUMBER
+                    ))
                 else null
             }
         } catch (e: Exception) {
@@ -441,14 +476,16 @@ class KateService : Service() {
 
     private fun persistHabit(event: KateEvent.HabitUpdate) {
         scope.launch {
-            val key      = "${event.intent}_${event.entity}"
+            val key = "${event.intent}_${event.entity}"
             val existing = habitDao.getAll().find { it.key == key }
-            habitDao.insert(HabitEntity(
-                key    = key,
-                intent = event.intent,
-                entity = event.entity,
-                count  = (existing?.count ?: 0) + 1
-            ))
+            habitDao.insert(
+                HabitEntity(
+                    key = key,
+                    intent = event.intent,
+                    entity = event.entity,
+                    count = (existing?.count ?: 0) + 1
+                )
+            )
         }
     }
 
@@ -487,10 +524,11 @@ class KateService : Service() {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Fixed: Fully qualified ServiceInfo reference
             startForeground(
                 NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                android.app.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             )
         } else {
             startForeground(NOTIFICATION_ID, notification)
