@@ -72,7 +72,6 @@ class KateService : Service() {
             db = KateDatabase.getDatabase(this)
             habitDao = db.habitDao()
 
-            // Fixed: KateSpeechManager initialization with proper parameters
             speechManager = KateSpeechManager(
                 context = this,
                 onResult = { text ->
@@ -111,7 +110,6 @@ class KateService : Service() {
             Log.e("KateService", "Init error: ${e.message}")
         }
 
-        // Start listening after short stability delay
         mainHandler.postDelayed({
             speechManager.startListening()
             mainHandler.postDelayed({
@@ -120,7 +118,6 @@ class KateService : Service() {
         }, 800)
     }
 
-    // ── Speech router ────────────────────────────────────────
     private fun handleSpeech(text: String) {
         when (text.uppercase().trim()) {
             "WAKE" -> {
@@ -133,7 +130,6 @@ class KateService : Service() {
         }
     }
 
-    // ── Speak helper — pauses mic while Kate speaks ──────────
     private fun speak(text: String, delayMs: Long = 1200L) {
         speechManager.setSpeaking(true)
         tts.speak(text)
@@ -142,15 +138,12 @@ class KateService : Service() {
         }, delayMs)
     }
 
-    // ── Full command handler ─────────────────────────────────
     private suspend fun handleVoiceCommand(text: String) {
         val lower = text.lowercase().trim()
         Log.d("Kate", "Command: $lower")
 
         when {
-            // ── App launching ────────────────────────────────
-            lower.contains("open") ||
-            lower.contains("launch") -> {
+            lower.contains("open") || lower.contains("launch") -> {
                 val appName = lower
                     .replace("open", "")
                     .replace("launch", "")
@@ -163,17 +156,12 @@ class KateService : Service() {
                 launcher.launchByVoiceCommand(appName)
             }
 
-            // ── Music ─────────────────────────────────────────
-            lower.contains("play music") ||
-            lower.contains("play songs") ||
-            lower.contains("music") -> {
+            lower.contains("play music") || lower.contains("play songs") || lower.contains("music") -> {
                 speak("Opening music")
                 launcher.openMusicApp()
             }
 
-            // ── Search ────────────────────────────────────────
-            lower.contains("search for") ||
-            lower.contains("google") -> {
+            lower.contains("search for") || lower.contains("google") -> {
                 val query = lower
                     .replace("search for", "")
                     .replace("google", "")
@@ -185,13 +173,9 @@ class KateService : Service() {
             lower.contains("youtube") -> {
                 val query = lower.replace("youtube", "").trim()
                 speak("Opening YouTube")
-                launcher.search(
-                    query,
-                    SearchEngine.YOUTUBE
-                )
+                launcher.search(query, SearchEngine.YOUTUBE)
             }
 
-            // ── Calls ─────────────────────────────────────────
             lower.contains("call ") -> {
                 val name = lower.substringAfter("call").trim()
                 val number = lookupContact(name)
@@ -209,10 +193,7 @@ class KateService : Service() {
                 makeCall(number)
             }
 
-            // ── SMS ───────────────────────────────────────────
-            lower.contains("send message to") ||
-            lower.contains("text ") ||
-            lower.contains("sms ") -> {
+            lower.contains("send message to") || lower.contains("text ") || lower.contains("sms ") -> {
                 val parts = lower
                     .replace("send message to", "")
                     .replace("text", "")
@@ -238,39 +219,22 @@ class KateService : Service() {
                 }
             }
 
-            // ── Flashlight ────────────────────────────────────
-            lower.contains("torch on") ||
-            lower.contains("flashlight on") ||
-            lower.contains("turn on torch") ||
-            lower.contains("turn on flashlight") -> {
-                if (hardware.torchOn()) {
-                    speak("Flashlight on")
-                } else {
-                    speak("Couldn't turn on flashlight")
-                }
+            lower.contains("torch on") || lower.contains("flashlight on") ||
+            lower.contains("turn on torch") || lower.contains("turn on flashlight") -> {
+                if (hardware.torchOn()) speak("Flashlight on") else speak("Couldn't turn on flashlight")
             }
 
-            lower.contains("torch off") ||
-            lower.contains("flashlight off") ||
-            lower.contains("turn off torch") ||
-            lower.contains("turn off flashlight") -> {
-                if (hardware.torchOff()) {
-                    speak("Flashlight off")
-                } else {
-                    speak("Couldn't turn off flashlight")
-                }
+            lower.contains("torch off") || lower.contains("flashlight off") ||
+            lower.contains("turn off torch") || lower.contains("turn off flashlight") -> {
+                if (hardware.torchOff()) speak("Flashlight off") else speak("Couldn't turn off flashlight")
             }
 
-            // ── Volume ────────────────────────────────────────
-            lower.contains("volume up") ||
-            lower.contains("increase volume") -> {
+            lower.contains("volume up") || lower.contains("increase volume") -> {
                 hardware.volumeUp()
                 speak("Volume up")
             }
 
-            lower.contains("volume down") ||
-            lower.contains("decrease volume") ||
-            lower.contains("lower volume") -> {
+            lower.contains("volume down") || lower.contains("decrease volume") || lower.contains("lower volume") -> {
                 hardware.volumeDown()
                 speak("Volume down")
             }
@@ -280,42 +244,26 @@ class KateService : Service() {
                 speak("Muted")
             }
 
-            // ── DND ───────────────────────────────────────────
-            lower.contains("do not disturb on") ||
-            lower.contains("silence") -> {
-                if (hardware.setDND(true)) {
-                    speak("Do not disturb enabled")
-                } else {
-                    speak("Cannot enable DND. Please grant notification policy access.")
-                }
+            lower.contains("do not disturb on") || lower.contains("silence") -> {
+                if (hardware.setDND(true)) speak("Do not disturb enabled")
+                else speak("Cannot enable DND. Please grant notification policy access.")
             }
 
             lower.contains("do not disturb off") -> {
-                if (hardware.setDND(false)) {
-                    speak("Do not disturb disabled")
-                } else {
-                    speak("Cannot disable DND. Please grant notification policy access.")
-                }
+                if (hardware.setDND(false)) speak("Do not disturb disabled")
+                else speak("Cannot disable DND. Please grant notification policy access.")
             }
 
-            // ── Reminders ─────────────────────────────────────
-            lower.contains("remind me") ||
-            lower.contains("set reminder") ||
-            lower.contains("set alarm") -> {
+            lower.contains("remind me") || lower.contains("set reminder") || lower.contains("set alarm") -> {
                 speak("Reminder noted. I'm still learning to schedule precisely.")
             }
 
-            // ── Browser ───────────────────────────────────────
-            lower.contains("open browser") ||
-            lower.contains("open chrome") -> {
+            lower.contains("open browser") || lower.contains("open chrome") -> {
                 speak("Opening browser")
                 launcher.openBrowser()
             }
 
-            // ── Greetings ─────────────────────────────────────
-            lower.contains("hello") ||
-            lower.contains("hi kate") ||
-            lower.contains("hey kate") -> {
+            lower.contains("hello") || lower.contains("hi kate") || lower.contains("hey kate") -> {
                 speak("Hello! How can I help you?")
             }
 
@@ -323,28 +271,22 @@ class KateService : Service() {
                 speak("I'm doing great, always ready to help!")
             }
 
-            lower.contains("what can you do") ||
-            lower.contains("help") -> {
+            lower.contains("what can you do") || lower.contains("help") -> {
                 speak("I can open apps, make calls, send messages, search the web, control your flashlight and volume, and much more.")
             }
 
-            // ── Time / Date ───────────────────────────────────
             lower.contains("what time") -> {
-                val time = java.text.SimpleDateFormat(
-                    "h:mm a", java.util.Locale.getDefault()
-                ).format(java.util.Date())
+                val time = java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault())
+                    .format(java.util.Date())
                 speak("It is $time")
             }
 
-            lower.contains("what date") ||
-            lower.contains("today's date") -> {
-                val date = java.text.SimpleDateFormat(
-                    "MMMM d, yyyy", java.util.Locale.getDefault()
-                ).format(java.util.Date())
+            lower.contains("what date") || lower.contains("today's date") -> {
+                val date = java.text.SimpleDateFormat("MMMM d, yyyy", java.util.Locale.getDefault())
+                    .format(java.util.Date())
                 speak("Today is $date")
             }
 
-            // ── Accessibility ─────────────────────────────────
             lower.contains("go back") -> {
                 KateAccessibilityService.instance?.goBack()
                 speak("Going back")
@@ -355,8 +297,7 @@ class KateService : Service() {
                 speak("Going home")
             }
 
-            lower.contains("show notifications") ||
-            lower.contains("open notifications") -> {
+            lower.contains("show notifications") || lower.contains("open notifications") -> {
                 KateAccessibilityService.instance?.showNotifications()
                 speak("Opening notifications")
             }
@@ -366,37 +307,27 @@ class KateService : Service() {
                 speak("Screenshot taken")
             }
 
-            lower.contains("recent apps") ||
-            lower.contains("show recents") -> {
+            lower.contains("recent apps") || lower.contains("show recents") -> {
                 KateAccessibilityService.instance?.openRecents()
                 speak("Recent apps")
             }
 
-            lower.contains("type ") ||
-            lower.contains("write ") -> {
-                val typing = lower
-                    .replace("type", "")
-                    .replace("write", "")
-                    .trim()
+            lower.contains("type ") || lower.contains("write ") -> {
+                val typing = lower.replace("type", "").replace("write", "").trim()
                 val ok = KateAccessibilityService.instance?.ghostType(typing) ?: false
                 speak(if (ok) "Typed" else "Nothing to type into")
             }
 
-            lower.contains("read screen") ||
-            lower.contains("what's on screen") -> {
+            lower.contains("read screen") || lower.contains("what's on screen") -> {
                 val screen = KateAccessibilityService.instance?.readScreen() ?: ""
                 speak(if (screen.isNotBlank()) screen.take(200) else "Nothing on screen")
             }
 
-            // ── Stop ──────────────────────────────────────────
-            lower.contains("stop listening") ||
-            lower.contains("goodbye kate") ||
-            lower.contains("bye kate") -> {
+            lower.contains("stop listening") || lower.contains("goodbye kate") || lower.contains("bye kate") -> {
                 speak("Goodbye!")
                 speechManager.stopListening()
             }
 
-            // ── TFLite fallback ───────────────────────────────
             else -> {
                 if (lower.isNotBlank()) {
                     val intent = try {
@@ -422,14 +353,13 @@ class KateService : Service() {
             }
         }
 
-        // Log habit
         try {
             bridge.processText(text)
         } catch (e: Exception) {
+            // ignore
         }
     }
 
-    // ── Contact lookup ───────────────────────────────────────
     private fun lookupContact(name: String): String? {
         return try {
             val cursor = contentResolver.query(
@@ -444,9 +374,7 @@ class KateService : Service() {
             )
             cursor?.use {
                 if (it.moveToFirst())
-                    it.getString(it.getColumnIndexOrThrow(
-                        ContactsContract.CommonDataKinds.Phone.NUMBER
-                    ))
+                    it.getString(it.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.NUMBER))
                 else null
             }
         } catch (e: Exception) {
@@ -467,8 +395,7 @@ class KateService : Service() {
 
     private fun sendSms(number: String, message: String) {
         try {
-            SmsManager.getDefault()
-                .sendTextMessage(number, null, message, null, null)
+            SmsManager.getDefault().sendTextMessage(number, null, message, null, null)
         } catch (e: Exception) {
             speak("I couldn't send the message")
         }
@@ -512,8 +439,7 @@ class KateService : Service() {
             "Kate Assistant",
             NotificationManager.IMPORTANCE_LOW
         )
-        getSystemService(NotificationManager::class.java)
-            .createNotificationChannel(channel)
+        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Kate is running")
@@ -524,11 +450,10 @@ class KateService : Service() {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Fixed: Fully qualified ServiceInfo reference
             startForeground(
                 NOTIFICATION_ID,
                 notification,
-                android.app.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             )
         } else {
             startForeground(NOTIFICATION_ID, notification)
