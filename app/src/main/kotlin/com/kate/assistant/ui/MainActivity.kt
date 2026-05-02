@@ -72,14 +72,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isAccessibilityEnabled(): Boolean {
-        val service = "${packageName}/com.kate.assistant.services.KateAccessibilityService"
-        return try {
-            val enabled = Settings.Secure.getString(
-                contentResolver,
-                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-            ) ?: return false
-            TextUtils.SimpleStringSplitter(':').also { it.setString(enabled) }
-                .asSequence().any { it.equals(service, ignoreCase = true) }
-        } catch (e: Exception) { false }
+    val service = "${packageName}/com.kate.assistant.services.KateAccessibilityService"
+    return try {
+        val enabled = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+
+        val splitter = TextUtils.SimpleStringSplitter(':')
+        splitter.setString(enabled)
+        while (splitter.hasNext()) {
+            val name = splitter.next()
+            if (name.equals(service, ignoreCase = true)) return true
+        }
+        false
+    } catch (e: Exception) {
+        false
     }
 }
