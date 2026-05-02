@@ -107,6 +107,7 @@ class KateService : Service() {
             Log.e("KateService", "Init error: ${e.message}")
         }
 
+        // Start listening after short stability delay
         mainHandler.postDelayed({
             speechManager.startListening()
             mainHandler.postDelayed({
@@ -115,24 +116,30 @@ class KateService : Service() {
         }, 800)
     }
 
+    // ── Speech router ────────────────────────────────────────
     private fun handleSpeech(text: String) {
         when (text.uppercase().trim()) {
             "WAKE" -> {
                 Log.d("Kate", "Wake word detected")
-                speak("Yes?")
+                speak("Yes?", 600)
             }
             else -> scope.launch { handleVoiceCommand(text) }
         }
     }
 
-    private fun speak(text: String, delayMs: Long = 1200L) {
+    // ── Speak — pauses mic while Kate talks ──────────────────
+    private fun speak(text: String, delayMs: Long = -1L) {
         speechManager.setSpeaking(true)
         tts.speak(text)
+        // Calculate delay based on word count — ~400ms per word + 800ms buffer
+        val words = text.split(" ").size
+        val delay = if (delayMs > 0) delayMs else (words * 400L + 800L)
         mainHandler.postDelayed({
             speechManager.setSpeaking(false)
-        }, delayMs)
+        }, delay)
     }
 
+    // ── Full command handler ─────────────────────────────────
     private suspend fun handleVoiceCommand(text: String) {
         val lower = text.lowercase().trim()
         Log.d("Kate", "Command: $lower")
@@ -264,14 +271,16 @@ class KateService : Service() {
             }
 
             lower.contains("what time") -> {
-                val time = java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault())
+                val time = java.text.SimpleDateFormat(
+                    "h:mm a", java.util.Locale.getDefault())
                     .format(java.util.Date())
                 speak("It is $time")
             }
 
             lower.contains("what date") ||
             lower.contains("today's date") -> {
-                val date = java.text.SimpleDateFormat("MMMM d, yyyy", java.util.Locale.getDefault())
+                val date = java.text.SimpleDateFormat(
+                    "MMMM d, yyyy", java.util.Locale.getDefault())
                     .format(java.util.Date())
                 speak("Today is $date")
             }
@@ -305,7 +314,8 @@ class KateService : Service() {
 
             lower.contains("type ") ||
             lower.contains("write ") -> {
-                val typing = lower.replace("type", "").replace("write", "").trim()
+                val typing = lower
+                    .replace("type", "").replace("write", "").trim()
                 val ok = KateAccessibilityService.instance?.ghostType(typing) ?: false
                 speak(if (ok) "Typed" else "Nothing to type into")
             }
@@ -323,10 +333,13 @@ class KateService : Service() {
                 speechManager.stopListening()
             }
 
+            // ── TFLite fallback ───────────────────────────────
             else -> {
-                if (lower.isNotBlank()) {
+                if (lower.length > 2) {
                     val intent = try {
-                        withContext(Dispatchers.IO) { intentClassifier.classify(text) }
+                        withContext(Dispatchers.IO) {
+                            intentClassifier.classify(text)
+                        }
                     } catch (e: Exception) { "UNKNOWN" }
                     Log.d("Kate", "TFLite: $intent")
                     when (intent) {
@@ -335,7 +348,7 @@ class KateService : Service() {
                         "COMMUNICATION"  -> speak("Who should I contact?")
                         "REMINDER"       -> speak("What should I remind you about?")
                         "SYSTEM_CONTROL" -> speak("What system setting?")
-                        else             -> speak("You said $text. I am still learning.")
+                        else             -> speak("I didn't catch that. Try again.")
                     }
                 }
             }
@@ -378,7 +391,8 @@ class KateService : Service() {
 
     private fun sendSms(number: String, message: String) {
         try {
-            SmsManager.getDefault().sendTextMessage(number, null, message, null, null)
+            SmsManager.getDefault()
+                .sendTextMessage(number, null, message, null, null)
         } catch (e: Exception) { speak("I couldn't send the message") }
     }
 
@@ -403,7 +417,7 @@ class KateService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
 
     override fun onDestroy() {
-        speechManager.stopListening()
+        speechManager.shutdown()
         bridge.stopAudio()
         intentClassifier.close()
         scope.cancel()
