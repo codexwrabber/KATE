@@ -6,6 +6,7 @@ import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.*
 import android.provider.ContactsContract
+import android.provider.Settings
 import android.telephony.SmsManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -107,16 +108,27 @@ class KateService : Service() {
             Log.e("KateService", "Init error: ${e.message}")
         }
 
-        // Start listening after short stability delay
+        // Start listening after short delay
         mainHandler.postDelayed({
             speechManager.startListening()
             mainHandler.postDelayed({
                 speak("Kate is online.")
             }, 500)
         }, 800)
+
+        // Watchdog — restart listening if silent for 5 minutes
+        mainHandler.postDelayed(object : Runnable {
+            override fun run() {
+                if (!speechManager.isListening() && !speechManager.isSpeaking()) {
+                    Log.w("Kate", "Watchdog: restarting speech")
+                    speechManager.startListening()
+                }
+                mainHandler.postDelayed(this, 300_000L)
+            }
+        }, 300_000L)
     }
 
-    // ── Speech router ────────────────────────────────────────
+    // ── Speech router ─────────────────────────────────────────
     private fun handleSpeech(text: String) {
         when (text.uppercase().trim()) {
             "WAKE" -> {
@@ -131,7 +143,6 @@ class KateService : Service() {
     private fun speak(text: String, delayMs: Long = -1L) {
         speechManager.setSpeaking(true)
         tts.speak(text)
-        // Calculate delay based on word count — ~400ms per word + 800ms buffer
         val words = text.split(" ").size
         val delay = if (delayMs > 0) delayMs else (words * 400L + 800L)
         mainHandler.postDelayed({
@@ -144,16 +155,28 @@ class KateService : Service() {
         val lower = text.lowercase().trim()
         Log.d("Kate", "Command: $lower")
 
+        // Ignore noise — must have meaningful content
+        if (lower.length < 3 || lower.split(" ").all { it.length < 2 }) {
+            Log.d("Kate", "Ignoring noise: $lower")
+            return
+        }
+
         when {
+
+            // ── App launching ─────────────────────────────────
             lower.contains("open") ||
             lower.contains("launch") -> {
                 val appName = lower
-                    .replace("open", "").replace("launch", "").trim()
+                    .replace("open", "")
+                    .replace("launch", "")
+                    .trim()
                 if (appName.isBlank()) { speak("Which app?"); return }
-                speak("Opening $appName")
-                launcher.launchByVoiceCommand(appName)
+                val launched = launcher.launchByVoiceCommand(appName)
+                if (launched) speak("Opening $appName")
+                else speak("I couldn't find $appName. Searching Play Store.")
             }
 
+            // ── Music ─────────────────────────────────────────
             lower.contains("play music") ||
             lower.contains("play songs") ||
             lower.contains("music") -> {
@@ -161,10 +184,14 @@ class KateService : Service() {
                 launcher.openMusicApp()
             }
 
+            // ── Search ────────────────────────────────────────
             lower.contains("search for") ||
             lower.contains("google") -> {
                 val query = lower
-                    .replace("search for", "").replace("google", "").trim()
+                    .replace("search for", "")
+                    .replace("google", "")
+                    .trim()
+                if (query.isBlank()) { speak("What should I search?"); return }
                 speak("Searching for $query")
                 launcher.search(query)
             }
@@ -175,86 +202,150 @@ class KateService : Service() {
                 launcher.search(query, SearchEngine.YOUTUBE)
             }
 
+            // ── Calls ─────────────────────────────────────────
             lower.contains("call ") -> {
                 val name   = lower.substringAfter("call").trim()
+                if (name.isBlank()) { speak("Who should I call?"); return }
                 val number = lookupContact(name)
-                if (number != null) { speak("Calling $name", 800); makeCall(number) }
-                else speak("I couldn't find $name in your contacts")
+                if (number != null) {
+                    speak("Calling $name", 800)
+                    makeCall(number)
+                } else {
+                    speak("I couldn't find $name in your contacts")
+                }
             }
 
             lower.contains("dial ") -> {
                 val number = lower.substringAfter("dial").trim()
+                if (number.isBlank()) { speak("What number?"); return }
                 speak("Dialing $number", 800)
                 makeCall(number)
             }
 
+            // ── SMS ───────────────────────────────────────────
             lower.contains("send message to") ||
             lower.contains("text ") ||
             lower.contains("sms ") -> {
                 val parts   = lower
                     .replace("send message to", "")
-                    .replace("text", "").replace("sms", "")
-                    .trim().split(" saying ")
+                    .replace("text", "")
+                    .replace("sms", "")
+                    .trim()
+                    .split(" saying ")
                 val name    = parts.getOrNull(0)?.trim() ?: ""
                 val message = parts.getOrNull(1)?.trim() ?: ""
                 if (name.isBlank())    { speak("Who should I message?"); return }
                 if (message.isBlank()) { speak("What should I say?");    return }
                 val number = lookupContact(name)
-                if (number != null) { sendSms(number, message); speak("Message sent to $name") }
-                else speak("I couldn't find $name in your contacts")
+                if (number != null) {
+                    sendSms(number, message)
+                    speak("Message sent to $name")
+                } else {
+                    speak("I couldn't find $name in your contacts")
+                }
             }
 
-            lower.contains("torch on") ||
-            lower.contains("flashlight on") ||
-            lower.contains("turn on torch") ||
+            // ── Flashlight ────────────────────────────────────
+            lower.contains("torch on")          ||
+            lower.contains("flashlight on")     ||
+            lower.contains("turn on torch")     ||
             lower.contains("turn on flashlight") -> {
-                hardware.torchOn(); speak("Flashlight on")
+                hardware.torchOn()
+                speak("Flashlight on")
             }
 
-            lower.contains("torch off") ||
-            lower.contains("flashlight off") ||
-            lower.contains("turn off torch") ||
+            lower.contains("torch off")          ||
+            lower.contains("flashlight off")     ||
+            lower.contains("turn off torch")     ||
             lower.contains("turn off flashlight") -> {
-                hardware.torchOff(); speak("Flashlight off")
+                hardware.torchOff()
+                speak("Flashlight off")
             }
 
+            // ── Volume ────────────────────────────────────────
             lower.contains("volume up") ||
             lower.contains("increase volume") -> {
-                hardware.volumeUp(); speak("Volume up")
+                hardware.volumeUp()
+                speak("Volume up")
             }
 
-            lower.contains("volume down") ||
+            lower.contains("volume down")    ||
             lower.contains("decrease volume") ||
             lower.contains("lower volume") -> {
-                hardware.volumeDown(); speak("Volume down")
+                hardware.volumeDown()
+                speak("Volume down")
             }
 
             lower.contains("mute") -> {
-                hardware.muteAll(); speak("Muted")
+                hardware.muteAll()
+                speak("Muted")
             }
 
+            lower.contains("unmute") -> {
+                hardware.unmuteAll()
+                speak("Unmuted")
+            }
+
+            // ── DND ───────────────────────────────────────────
             lower.contains("do not disturb on") ||
             lower.contains("silence") -> {
-                if (hardware.setDND(true)) speak("Do not disturb enabled")
-                else speak("Cannot enable DND. Please grant notification policy access.")
+                val notifManager = getSystemService(NotificationManager::class.java)
+                if (!notifManager.isNotificationPolicyAccessGranted) {
+                    speak("I need notification access. Opening settings.")
+                    startActivity(
+                        Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                } else {
+                    if (hardware.setDND(true)) speak("Do not disturb enabled")
+                    else speak("Could not enable do not disturb")
+                }
             }
 
             lower.contains("do not disturb off") -> {
-                if (hardware.setDND(false)) speak("Do not disturb disabled")
-                else speak("Cannot disable DND. Please grant notification policy access.")
+                val notifManager = getSystemService(NotificationManager::class.java)
+                if (!notifManager.isNotificationPolicyAccessGranted) {
+                    speak("I need notification access. Opening settings.")
+                    startActivity(
+                        Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                } else {
+                    if (hardware.setDND(false)) speak("Do not disturb disabled")
+                    else speak("Could not disable do not disturb")
+                }
             }
 
+            // ── Reminders ─────────────────────────────────────
             lower.contains("remind me") ||
             lower.contains("set reminder") ||
             lower.contains("set alarm") -> {
-                speak("Reminder noted. I'm still learning to schedule precisely.")
+                val delayMs = parseTimeFromText(lower)
+                if (delayMs > 0) {
+                    val task = lower
+                        .replace("remind me to", "")
+                        .replace("remind me", "")
+                        .replace("set reminder", "")
+                        .replace("set alarm", "")
+                        .trim()
+                        .split(Regex("in \\d+ (minute|hour)")).firstOrNull()?.trim() ?: "task"
+                    reminderScheduler.schedule(task, delayMs)
+                    val unit = if (delayMs < 3600_000) "${delayMs / 60_000} minutes"
+                               else "${delayMs / 3600_000} hours"
+                    speak("Reminder set for $unit from now")
+                } else {
+                    speak("When should I remind you? Say something like: remind me in 10 minutes")
+                }
             }
 
+            // ── Browser ───────────────────────────────────────
             lower.contains("open browser") ||
             lower.contains("open chrome") -> {
-                speak("Opening browser"); launcher.openBrowser()
+                speak("Opening browser")
+                launcher.openBrowser()
             }
 
+            // ── Greetings ─────────────────────────────────────
             lower.contains("hello") ||
             lower.contains("hi kate") ||
             lower.contains("hey kate") -> {
@@ -267,10 +358,17 @@ class KateService : Service() {
 
             lower.contains("what can you do") ||
             lower.contains("help") -> {
-                speak("I can open apps, make calls, send messages, search the web, control your flashlight and volume, and much more.")
+                speak("I can open apps, make calls, send messages, search the web, control your flashlight, volume, set reminders, and much more.")
             }
 
-            lower.contains("what time") -> {
+            lower.contains("what's your name") ||
+            lower.contains("who are you") -> {
+                speak("I'm Kate. Your Kernel-level Autonomous Task Engine.")
+            }
+
+            // ── Time / Date ───────────────────────────────────
+            lower.contains("what time") ||
+            lower.contains("current time") -> {
                 val time = java.text.SimpleDateFormat(
                     "h:mm a", java.util.Locale.getDefault())
                     .format(java.util.Date())
@@ -278,59 +376,66 @@ class KateService : Service() {
             }
 
             lower.contains("what date") ||
-            lower.contains("today's date") -> {
+            lower.contains("today's date") ||
+            lower.contains("what day") -> {
                 val date = java.text.SimpleDateFormat(
-                    "MMMM d, yyyy", java.util.Locale.getDefault())
+                    "EEEE, MMMM d yyyy", java.util.Locale.getDefault())
                     .format(java.util.Date())
                 speak("Today is $date")
             }
 
+            // ── Accessibility ─────────────────────────────────
             lower.contains("go back") -> {
                 KateAccessibilityService.instance?.goBack()
-                speak("Going back")
+                    ?: speak("Please enable Kate accessibility service first")
             }
 
             lower.contains("go home") -> {
                 KateAccessibilityService.instance?.goHome()
-                speak("Going home")
+                    ?: speak("Please enable Kate accessibility service first")
             }
 
             lower.contains("show notifications") ||
             lower.contains("open notifications") -> {
                 KateAccessibilityService.instance?.showNotifications()
-                speak("Opening notifications")
+                    ?: speak("Accessibility service not enabled")
             }
 
             lower.contains("take screenshot") -> {
                 KateAccessibilityService.instance?.takeScreenshot()
+                    ?: speak("Accessibility service not enabled")
                 speak("Screenshot taken")
             }
 
             lower.contains("recent apps") ||
             lower.contains("show recents") -> {
                 KateAccessibilityService.instance?.openRecents()
-                speak("Recent apps")
+                    ?: speak("Accessibility service not enabled")
             }
 
             lower.contains("type ") ||
             lower.contains("write ") -> {
                 val typing = lower
-                    .replace("type", "").replace("write", "").trim()
+                    .replace("type", "")
+                    .replace("write", "")
+                    .trim()
                 val ok = KateAccessibilityService.instance?.ghostType(typing) ?: false
-                speak(if (ok) "Typed" else "Nothing to type into")
+                speak(if (ok) "Done" else "Please enable Kate accessibility service to type")
             }
 
             lower.contains("read screen") ||
             lower.contains("what's on screen") -> {
                 val screen = KateAccessibilityService.instance?.readScreen() ?: ""
-                speak(if (screen.isNotBlank()) screen.take(200) else "Nothing on screen")
+                if (screen.isNotBlank()) speak(screen.take(200))
+                else speak("Please enable Kate accessibility service to read the screen")
             }
 
+            // ── Stop ──────────────────────────────────────────
             lower.contains("stop listening") ||
             lower.contains("goodbye kate") ||
             lower.contains("bye kate") -> {
                 speak("Goodbye!")
-                speechManager.stopListening()
+                mainHandler.postDelayed({ speechManager.stopListening() }, 1500)
             }
 
             // ── TFLite fallback ───────────────────────────────
@@ -346,17 +451,30 @@ class KateService : Service() {
                         "OPEN_APP"       -> speak("Which app should I open?")
                         "MEDIA_CONTROL"  -> { speak("Opening music"); launcher.openMusicApp() }
                         "COMMUNICATION"  -> speak("Who should I contact?")
-                        "REMINDER"       -> speak("What should I remind you about?")
-                        "SYSTEM_CONTROL" -> speak("What system setting?")
+                        "REMINDER"       -> speak("When should I remind you?")
+                        "SYSTEM_CONTROL" -> speak("What system setting would you like to change?")
                         else             -> speak("I didn't catch that. Try again.")
                     }
                 }
             }
         }
 
+        // Log to habit engine
         try { bridge.processText(text) } catch (e: Exception) { }
     }
 
+    // ── Time parser ───────────────────────────────────────────
+    private fun parseTimeFromText(text: String): Long {
+        val minuteMatch = Regex("(\\d+)\\s*minute").find(text)
+        val hourMatch   = Regex("(\\d+)\\s*hour").find(text)
+        return when {
+            minuteMatch != null -> minuteMatch.groupValues[1].toLong() * 60_000L
+            hourMatch   != null -> hourMatch.groupValues[1].toLong()   * 3_600_000L
+            else                -> -1L
+        }
+    }
+
+    // ── Contact lookup ────────────────────────────────────────
     private fun lookupContact(name: String): String? {
         return try {
             val cursor = contentResolver.query(
@@ -383,17 +501,25 @@ class KateService : Service() {
 
     private fun makeCall(number: String) {
         try {
-            Intent(Intent.ACTION_CALL, Uri.parse("tel:$number"))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                .let { startActivity(it) }
-        } catch (e: Exception) { speak("I couldn't make the call") }
+            startActivity(
+                Intent(Intent.ACTION_CALL, Uri.parse("tel:${number.trim()}"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    .addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY)
+            )
+        } catch (e: Exception) {
+            speak("I couldn't make the call")
+            Log.e("Kate", "Call failed: ${e.message}")
+        }
     }
 
     private fun sendSms(number: String, message: String) {
         try {
             SmsManager.getDefault()
-                .sendTextMessage(number, null, message, null, null)
-        } catch (e: Exception) { speak("I couldn't send the message") }
+                .sendTextMessage(number.trim(), null, message, null, null)
+        } catch (e: Exception) {
+            speak("I couldn't send the message")
+            Log.e("Kate", "SMS failed: ${e.message}")
+        }
     }
 
     private fun persistHabit(event: KateEvent.HabitUpdate) {
