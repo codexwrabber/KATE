@@ -2,26 +2,46 @@ package com.kate.assistant.features.device
 
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.telephony.SmsManager
+import android.util.Log
 
 class KateDeviceController(private val context: Context) {
-    private val pm = context.packageManager
 
     fun openApp(packageName: String): Boolean {
-        val intent = pm.getLaunchIntentForPackage(packageName)
-            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) ?: return false
-        return runCatching { context.startActivity(intent); true }.getOrDefault(false)
+        return try {
+            val intent = context.packageManager
+                .getLaunchIntentForPackage(packageName)
+                ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) ?: return false
+            context.startActivity(intent)
+            true
+        } catch (e: Exception) {
+            Log.e("KateDevice", "openApp failed: ${e.message}")
+            false
+        }
     }
 
     fun makeCall(number: String) {
-        Intent(Intent.ACTION_CALL, Uri.parse("tel:$number"))
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            .let { context.startActivity(it) }
+        try {
+            // FLAG_ACTIVITY_NEW_TASK + FLAG_ACTIVITY_CLEAR_TOP prevents
+            // Kate's service from pulling focus back and ending the call
+            context.startActivity(
+                Intent(Intent.ACTION_CALL, Uri.parse("tel:${number.trim()}"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    .addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY)
+            )
+        } catch (e: Exception) {
+            Log.e("KateDevice", "Call failed: ${e.message}")
+        }
     }
 
     fun sendSms(number: String, message: String) {
-        runCatching { SmsManager.getDefault().sendTextMessage(number, null, message, null, null) }
+        try {
+            SmsManager.getDefault()
+                .sendTextMessage(number.trim(), null, message, null, null)
+        } catch (e: Exception) {
+            Log.e("KateDevice", "SMS failed: ${e.message}")
+        }
     }
 }
