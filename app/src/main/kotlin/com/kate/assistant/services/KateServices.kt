@@ -1,453 +1,260 @@
-package com.kate.assistant.services
+package com.kate.assistant.features.voice
 
-import android.app.*
-import android.content.Intent
-import android.content.pm.ServiceInfo
-import android.net.Uri
-import android.os.*
-import android.provider.ContactsContract
-import android.telephony.SmsManager
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.media.*
+import android.os.Handler
+import android.os.Looper
+import android.os.Process
 import android.util.Log
-import androidx.core.app.NotificationCompat
-import com.kate.assistant.bridge.KateBridge
-import com.kate.assistant.bridge.KateEvent
-import com.kate.assistant.bridge.KateEventBus
-import com.kate.assistant.data.db.HabitDao
-import com.kate.assistant.data.db.HabitEntity
-import com.kate.assistant.data.db.KateDatabase
-import com.kate.assistant.features.device.KateDeviceController
-import com.kate.assistant.features.device.KateHardwareController
-import com.kate.assistant.features.launcher.KateAppLauncher
-import com.kate.assistant.features.launcher.SearchEngine
-import com.kate.assistant.features.nlp.IntentClassifier
-import com.kate.assistant.features.nlp.LabelMapper
-import com.kate.assistant.features.nlp.TextVectorizer
-import com.kate.assistant.features.phantom.PhantomJournal
-import com.kate.assistant.features.phantom.ProactiveEngine
-import com.kate.assistant.features.tasks.ReminderScheduler
-import com.kate.assistant.features.voice.KateSpeechManager
-import com.kate.assistant.features.voice.KateTts
-import kotlinx.coroutines.*
+import androidx.core.content.ContextCompat
+import org.json.JSONObject
+import org.vosk.Model
+import org.vosk.Recognizer
+import java.io.File
+import java.io.FileOutputStream
+import java.util.concurrent.atomic.AtomicBoolean
 
-class KateService : Service() {
+class KateSpeechManager(
+    private val context: Context,
+    private val onResult: (String) -> Unit,
+    private val onError: ((String) -> Unit)? = null
+) {
 
-    private lateinit var bridge: KateBridge
-    private lateinit var speechManager: KateSpeechManager
-    private lateinit var tts: KateTts
-    private lateinit var deviceController: KateDeviceController
-    private lateinit var hardware: KateHardwareController
-    private lateinit var launcher: KateAppLauncher
-    private lateinit var reminderScheduler: ReminderScheduler
-    private lateinit var db: KateDatabase
-    private lateinit var habitDao: HabitDao
-    private lateinit var phantomJournal: PhantomJournal
-    private lateinit var proactiveEngine: ProactiveEngine
-    private lateinit var intentClassifier: IntentClassifier
-    private lateinit var vectorizer: TextVectorizer
-    private lateinit var labelMapper: LabelMapper
+    private var model: Model? = null
+    private var recognizer: Recognizer? = null
+    private var audioRecord: AudioRecord? = null
+    private var thread: Thread? = null
+    private var watchdogHandler = Handler(Looper.getMainLooper())
+    private var watchdogRunnable: Runnable? = null
 
-    private val scope       = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val isRunning  = AtomicBoolean(false)
+    private val isSpeaking = AtomicBoolean(false)
+    private val wakeMode   = AtomicBoolean(false)
+    private val isReady    = AtomicBoolean(false)
 
-    companion object {
-        private const val CHANNEL_ID      = "kate_service_channel"
-        private const val NOTIFICATION_ID = 1
+    init {
+        Thread { initModel() }.start()
     }
 
-    override fun onCreate() {
-        super.onCreate()
-        startForegroundServiceSafe()
-
+    private fun initModel() {
         try {
-            bridge            = KateBridge(this)
-            tts               = KateTts(this)
-            deviceController  = KateDeviceController(this)
-            hardware          = KateHardwareController(this)
-            launcher          = KateAppLauncher(this)
-            reminderScheduler = ReminderScheduler(this)
-            phantomJournal    = PhantomJournal(this)
-            proactiveEngine   = ProactiveEngine(this)
-            intentClassifier  = IntentClassifier(this)
-            vectorizer        = TextVectorizer()
-            labelMapper       = LabelMapper(this)
-            db                = KateDatabase.getDatabase(this)
-            habitDao          = db.habitDao()
-
-            speechManager = KateSpeechManager(
-                context  = this,
-                onResult = { text -> handleSpeech(text) },
-                onError  = { error -> Log.e("Kate", "Speech error: $error") }
-            )
-
-            bridge.updateAppList(loadInstalledApps())
-
-            scope.launch {
-                val formatted = habitDao.getAll()
-                    .map { "${it.intent}|${it.entity}|${it.count}" }
-                    .toTypedArray()
-                bridge.loadHabits(formatted)
+            val modelDir = File(context.filesDir, "vosk-model")
+            if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
+                Log.d("KateSpeech", "Copying model from assets...")
+                copyAssets("model", modelDir)
             }
+            if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
+                onError?.invoke("Model not found")
+                return
+            }
+            model      = Model(modelDir.absolutePath)
+            recognizer = Recognizer(model, 16000.0f)
+            isReady.set(true)
+            Log.d("KateSpeech", "✅ Model loaded")
+        } catch (e: Exception) {
+            Log.e("KateSpeech", "Model init failed: ${e.message}")
+            onError?.invoke("Model init failed: ${e.message}")
+        }
+    }
 
-            KateEventBus.subscribe { event ->
-                when (event) {
-                    is KateEvent.WakeWordDetected -> Log.d("Kate", "Wake word!")
-                    is KateEvent.HabitUpdate      -> persistHabit(event)
-                    is KateEvent.AppOpened        -> {
-                        phantomJournal.logAppOpen(event.packageName)
-                        proactiveEngine.evaluate()
-                    }
-                    is KateEvent.Error -> Log.d("Kate", event.message)
-                    else               -> Unit
+    private fun copyAssets(assetPath: String, destDir: File) {
+        destDir.mkdirs()
+        val assets = context.assets.list(assetPath) ?: return
+        for (asset in assets) {
+            val src      = "$assetPath/$asset"
+            val dst      = File(destDir, asset)
+            val children = context.assets.list(src)
+            if (!children.isNullOrEmpty()) {
+                copyAssets(src, dst)
+            } else {
+                context.assets.open(src).use { input ->
+                    FileOutputStream(dst).use { output -> input.copyTo(output) }
                 }
             }
+        }
+    }
 
-            bridge.startAudio()
+    fun startListening() {
+        if (isRunning.get()) return
 
+        if (!isReady.get()) {
+            Log.w("KateSpeech", "Model not ready — retrying in 1s")
+            Handler(Looper.getMainLooper()).postDelayed({ startListening() }, 1000)
+            return
+        }
+
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            onError?.invoke("RECORD_AUDIO not granted")
+            return
+        }
+
+        val sampleRate = 16000
+        val bufferSize = AudioRecord.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        ).takeIf { it > 0 } ?: run {
+            onError?.invoke("Invalid buffer size")
+            return
+        }
+
+        val record = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION, // better for speech
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            bufferSize * 4  // larger buffer = more stable
+        )
+
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            onError?.invoke("AudioRecord init failed")
+            return
+        }
+
+        audioRecord = record
+        try {
+            audioRecord?.startRecording()
+            Log.d("KateSpeech", "🎤 Mic started")
         } catch (e: Exception) {
-            Log.e("KateService", "Init error: ${e.message}")
+            onError?.invoke("Mic start failed: ${e.message}")
+            return
         }
 
-        // Start listening after short stability delay
-        mainHandler.postDelayed({
-            speechManager.startListening()
-            mainHandler.postDelayed({
-                speak("Kate is online.")
-            }, 500)
-        }, 800)
-    }
+        isRunning.set(true)
+        startWatchdog()
 
-    // ── Speech router ────────────────────────────────────────
-    private fun handleSpeech(text: String) {
-        when (text.uppercase().trim()) {
-            "WAKE" -> {
-                Log.d("Kate", "Wake word detected")
-                speak("Yes?", 600)
-            }
-            else -> scope.launch { handleVoiceCommand(text) }
-        }
-    }
+        thread = Thread {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+            val buffer = ByteArray(bufferSize)
+            Log.d("KateSpeech", "Loop started")
 
-    // ── Speak — pauses mic while Kate talks ──────────────────
-    private fun speak(text: String, delayMs: Long = -1L) {
-        speechManager.setSpeaking(true)
-        tts.speak(text)
-        // Calculate delay based on word count — ~400ms per word + 800ms buffer
-        val words = text.split(" ").size
-        val delay = if (delayMs > 0) delayMs else (words * 400L + 800L)
-        mainHandler.postDelayed({
-            speechManager.setSpeaking(false)
-        }, delay)
-    }
+            while (isRunning.get()) {
+                try {
+                    if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                        Thread.sleep(200)
+                        continue
+                    }
 
-    // ── Full command handler ─────────────────────────────────
-    private suspend fun handleVoiceCommand(text: String) {
-        val lower = text.lowercase().trim()
-        Log.d("Kate", "Command: $lower")
+                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                    if (read <= 0) continue
+                    if (isSpeaking.get()) continue
 
-        when {
-            lower.contains("open") ||
-            lower.contains("launch") -> {
-                val appName = lower
-                    .replace("open", "").replace("launch", "").trim()
-                if (appName.isBlank()) { speak("Which app?"); return }
-                speak("Opening $appName")
-                launcher.launchByVoiceCommand(appName)
-            }
+                    // Feed to VOSK
+                    val accepted = recognizer?.acceptWaveForm(buffer, read) ?: false
 
-            lower.contains("play music") ||
-            lower.contains("play songs") ||
-            lower.contains("music") -> {
-                speak("Opening music")
-                launcher.openMusicApp()
-            }
-
-            lower.contains("search for") ||
-            lower.contains("google") -> {
-                val query = lower
-                    .replace("search for", "").replace("google", "").trim()
-                speak("Searching for $query")
-                launcher.search(query)
-            }
-
-            lower.contains("youtube") -> {
-                val query = lower.replace("youtube", "").trim()
-                speak("Opening YouTube")
-                launcher.search(query, SearchEngine.YOUTUBE)
-            }
-
-            lower.contains("call ") -> {
-                val name   = lower.substringAfter("call").trim()
-                val number = lookupContact(name)
-                if (number != null) { speak("Calling $name", 800); makeCall(number) }
-                else speak("I couldn't find $name in your contacts")
-            }
-
-            lower.contains("dial ") -> {
-                val number = lower.substringAfter("dial").trim()
-                speak("Dialing $number", 800)
-                makeCall(number)
-            }
-
-            lower.contains("send message to") ||
-            lower.contains("text ") ||
-            lower.contains("sms ") -> {
-                val parts   = lower
-                    .replace("send message to", "")
-                    .replace("text", "").replace("sms", "")
-                    .trim().split(" saying ")
-                val name    = parts.getOrNull(0)?.trim() ?: ""
-                val message = parts.getOrNull(1)?.trim() ?: ""
-                if (name.isBlank())    { speak("Who should I message?"); return }
-                if (message.isBlank()) { speak("What should I say?");    return }
-                val number = lookupContact(name)
-                if (number != null) { sendSms(number, message); speak("Message sent to $name") }
-                else speak("I couldn't find $name in your contacts")
-            }
-
-            lower.contains("torch on") ||
-            lower.contains("flashlight on") ||
-            lower.contains("turn on torch") ||
-            lower.contains("turn on flashlight") -> {
-                hardware.torchOn(); speak("Flashlight on")
-            }
-
-            lower.contains("torch off") ||
-            lower.contains("flashlight off") ||
-            lower.contains("turn off torch") ||
-            lower.contains("turn off flashlight") -> {
-                hardware.torchOff(); speak("Flashlight off")
-            }
-
-            lower.contains("volume up") ||
-            lower.contains("increase volume") -> {
-                hardware.volumeUp(); speak("Volume up")
-            }
-
-            lower.contains("volume down") ||
-            lower.contains("decrease volume") ||
-            lower.contains("lower volume") -> {
-                hardware.volumeDown(); speak("Volume down")
-            }
-
-            lower.contains("mute") -> {
-                hardware.muteAll(); speak("Muted")
-            }
-
-            lower.contains("do not disturb on") ||
-            lower.contains("silence") -> {
-                if (hardware.setDND(true)) speak("Do not disturb enabled")
-                else speak("Cannot enable DND. Please grant notification policy access.")
-            }
-
-            lower.contains("do not disturb off") -> {
-                if (hardware.setDND(false)) speak("Do not disturb disabled")
-                else speak("Cannot disable DND. Please grant notification policy access.")
-            }
-
-            lower.contains("remind me") ||
-            lower.contains("set reminder") ||
-            lower.contains("set alarm") -> {
-                speak("Reminder noted. I'm still learning to schedule precisely.")
-            }
-
-            lower.contains("open browser") ||
-            lower.contains("open chrome") -> {
-                speak("Opening browser"); launcher.openBrowser()
-            }
-
-            lower.contains("hello") ||
-            lower.contains("hi kate") ||
-            lower.contains("hey kate") -> {
-                speak("Hello! How can I help you?")
-            }
-
-            lower.contains("how are you") -> {
-                speak("I'm doing great, always ready to help!")
-            }
-
-            lower.contains("what can you do") ||
-            lower.contains("help") -> {
-                speak("I can open apps, make calls, send messages, search the web, control your flashlight and volume, and much more.")
-            }
-
-            lower.contains("what time") -> {
-                val time = java.text.SimpleDateFormat(
-                    "h:mm a", java.util.Locale.getDefault())
-                    .format(java.util.Date())
-                speak("It is $time")
-            }
-
-            lower.contains("what date") ||
-            lower.contains("today's date") -> {
-                val date = java.text.SimpleDateFormat(
-                    "MMMM d, yyyy", java.util.Locale.getDefault())
-                    .format(java.util.Date())
-                speak("Today is $date")
-            }
-
-            lower.contains("go back") -> {
-                KateAccessibilityService.instance?.goBack()
-                speak("Going back")
-            }
-
-            lower.contains("go home") -> {
-                KateAccessibilityService.instance?.goHome()
-                speak("Going home")
-            }
-
-            lower.contains("show notifications") ||
-            lower.contains("open notifications") -> {
-                KateAccessibilityService.instance?.showNotifications()
-                speak("Opening notifications")
-            }
-
-            lower.contains("take screenshot") -> {
-                KateAccessibilityService.instance?.takeScreenshot()
-                speak("Screenshot taken")
-            }
-
-            lower.contains("recent apps") ||
-            lower.contains("show recents") -> {
-                KateAccessibilityService.instance?.openRecents()
-                speak("Recent apps")
-            }
-
-            lower.contains("type ") ||
-            lower.contains("write ") -> {
-                val typing = lower
-                    .replace("type", "").replace("write", "").trim()
-                val ok = KateAccessibilityService.instance?.ghostType(typing) ?: false
-                speak(if (ok) "Typed" else "Nothing to type into")
-            }
-
-            lower.contains("read screen") ||
-            lower.contains("what's on screen") -> {
-                val screen = KateAccessibilityService.instance?.readScreen() ?: ""
-                speak(if (screen.isNotBlank()) screen.take(200) else "Nothing on screen")
-            }
-
-            lower.contains("stop listening") ||
-            lower.contains("goodbye kate") ||
-            lower.contains("bye kate") -> {
-                speak("Goodbye!")
-                speechManager.stopListening()
-            }
-
-            // ── TFLite fallback ───────────────────────────────
-            else -> {
-                if (lower.length > 2) {
-                    val intent = try {
-                        withContext(Dispatchers.IO) {
-                            intentClassifier.classify(text)
+                    if (accepted) {
+                        val json = recognizer?.result ?: "{}"
+                        val text = JSONObject(json)
+                            .optString("text", "")
+                            .lowercase().trim()
+                        if (text.length > 2) {
+                            Log.d("KateSpeech", "✅ Final: $text")
+                            handleResult(text)
                         }
-                    } catch (e: Exception) { "UNKNOWN" }
-                    Log.d("Kate", "TFLite: $intent")
-                    when (intent) {
-                        "OPEN_APP"       -> speak("Which app should I open?")
-                        "MEDIA_CONTROL"  -> { speak("Opening music"); launcher.openMusicApp() }
-                        "COMMUNICATION"  -> speak("Who should I contact?")
-                        "REMINDER"       -> speak("What should I remind you about?")
-                        "SYSTEM_CONTROL" -> speak("What system setting?")
-                        else             -> speak("I didn't catch that. Try again.")
+                    } else {
+                        val json    = recognizer?.partialResult ?: "{}"
+                        val partial = JSONObject(json)
+                            .optString("partial", "")
+                            .lowercase().trim()
+                        if (partial.isNotBlank()) {
+                            Log.d("KateSpeech", "Partial: $partial")
+                        }
+                        // Wake word on partial for fast response
+                        if ((partial.contains("hey kate") ||
+                             partial.contains("hey cat") ||
+                             partial.contains("okay kate")) && !wakeMode.get()) {
+                            Log.d("KateSpeech", "🔔 Wake word: $partial")
+                            wakeMode.set(true)
+                            onResult("WAKE")
+                        }
                     }
+
+                    // Reset watchdog — loop is alive
+                    resetWatchdog()
+
+                } catch (e: Exception) {
+                    Log.e("KateSpeech", "Loop error: ${e.message}")
+                    Thread.sleep(200)
                 }
             }
+            Log.d("KateSpeech", "Loop ended")
         }
-
-        try { bridge.processText(text) } catch (e: Exception) { }
+        thread?.start()
     }
 
-    private fun lookupContact(name: String): String? {
-        return try {
-            val cursor = contentResolver.query(
-                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                arrayOf(
-                    ContactsContract.CommonDataKinds.Phone.NUMBER,
-                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
-                ),
-                "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
-                arrayOf("%$name%"),
-                null
-            )
-            cursor?.use {
-                if (it.moveToFirst())
-                    it.getString(it.getColumnIndexOrThrow(
-                        ContactsContract.CommonDataKinds.Phone.NUMBER))
-                else null
+    private fun handleResult(text: String) {
+        when {
+            text.contains("hey kate") ||
+            text.contains("hey cat")  ||
+            text.contains("okay kate") -> {
+                wakeMode.set(true)
+                onResult("WAKE")
             }
-        } catch (e: Exception) {
-            Log.e("Kate", "Contact lookup: ${e.message}")
-            null
+            wakeMode.get() -> {
+                wakeMode.set(false)
+                onResult(text)
+            }
+            else -> onResult(text)
         }
     }
 
-    private fun makeCall(number: String) {
-        try {
-            Intent(Intent.ACTION_CALL, Uri.parse("tel:$number"))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                .let { startActivity(it) }
-        } catch (e: Exception) { speak("I couldn't make the call") }
+    // ── Watchdog — restarts mic if it goes silent ────────────
+    private fun startWatchdog() {
+        watchdogRunnable = Runnable {
+            if (isRunning.get()) {
+                Log.w("KateSpeech", "Watchdog triggered — restarting mic")
+                restartListening()
+            }
+        }
+        resetWatchdog()
     }
 
-    private fun sendSms(number: String, message: String) {
-        try {
-            SmsManager.getDefault()
-                .sendTextMessage(number, null, message, null, null)
-        } catch (e: Exception) { speak("I couldn't send the message") }
-    }
-
-    private fun persistHabit(event: KateEvent.HabitUpdate) {
-        scope.launch {
-            val key      = "${event.intent}_${event.entity}"
-            val existing = habitDao.getAll().find { it.key == key }
-            habitDao.insert(HabitEntity(
-                key    = key,
-                intent = event.intent,
-                entity = event.entity,
-                count  = (existing?.count ?: 0) + 1
-            ))
+    private fun resetWatchdog() {
+        watchdogRunnable?.let {
+            watchdogHandler.removeCallbacks(it)
+            watchdogHandler.postDelayed(it, 30000) // restart if silent for 30s
         }
     }
 
-    private fun loadInstalledApps(): Array<String> =
-        packageManager.getInstalledApplications(0).map {
-            "${packageManager.getApplicationLabel(it).toString().lowercase()}|${it.packageName}"
-        }.toTypedArray()
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
-
-    override fun onDestroy() {
-        speechManager.shutdown()
-        bridge.stopAudio()
-        intentClassifier.close()
-        scope.cancel()
-        super.onDestroy()
+    private fun stopWatchdog() {
+        watchdogRunnable?.let { watchdogHandler.removeCallbacks(it) }
+        watchdogRunnable = null
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    fun restartListening() {
+        stopListening()
+        Thread.sleep(300)
+        startListening()
+    }
 
-    private fun startForegroundServiceSafe() {
-        val channel = NotificationChannel(
-            CHANNEL_ID, "Kate Assistant", NotificationManager.IMPORTANCE_LOW)
-        getSystemService(NotificationManager::class.java)
-            .createNotificationChannel(channel)
+    fun setSpeaking(state: Boolean) {
+        isSpeaking.set(state)
+        if (!state) resetWatchdog() // reset watchdog after speaking
+        Log.d("KateSpeech", "Speaking: $state")
+    }
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Kate is running")
-            .setContentText("Always listening...")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setOngoing(true)
-            .setSilent(true)
-            .build()
+    fun isListening(): Boolean = isRunning.get()
+    fun isSpeaking(): Boolean  = isSpeaking.get()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
+    fun stopListening() {
+        isRunning.set(false)
+        wakeMode.set(false)
+        stopWatchdog()
+        try { audioRecord?.stop(); audioRecord?.release() } catch (e: Exception) { }
+        audioRecord = null
+        try { thread?.join(1000) } catch (e: InterruptedException) { thread?.interrupt() }
+        thread = null
+        Log.d("KateSpeech", "Stopped")
+    }
+
+    fun shutdown() {
+        stopListening()
+        try { recognizer?.close(); model?.close() } catch (e: Exception) { }
+        recognizer = null
+        model      = null
+        isReady.set(false)
     }
 }
