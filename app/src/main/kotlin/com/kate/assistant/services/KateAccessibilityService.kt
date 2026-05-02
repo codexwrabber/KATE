@@ -61,18 +61,59 @@ class KateAccessibilityService : AccessibilityService() {
 
     // ── Ghost typing — type into any focused field ───────────
     fun ghostType(text: String): Boolean {
-        val root = rootInActiveWindow ?: return false
-        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
-        val args = Bundle().apply {
-            putCharSequence(
-                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                text
-            )
-        }
-        val result = focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-        Log.d(TAG, "Ghost type '$text': $result")
-        return result
+    val root = rootInActiveWindow ?: run {
+        Log.e(TAG, "No active window")
+        return false
     }
+
+    // Find focused input field
+    var focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+
+    // If no focused field, find any editable field
+    if (focused == null) {
+        focused = findEditableNode(root)
+    }
+
+    if (focused == null) {
+        Log.e(TAG, "No editable field found")
+        return false
+    }
+
+    // Click to focus it first
+    focused.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    Thread.sleep(100)
+
+    // Set the text
+    val args = Bundle().apply {
+        putCharSequence(
+            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+            text
+        )
+    }
+    val result = focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+
+    // Press Enter/Send after typing
+    if (result) {
+        Thread.sleep(200)
+        // Try to find and click send button
+        val sendNode = findNodeByDescription(root, "send") ?:
+                       findNodeByDescription(root, "Send") ?:
+                       findNodeByDescription(root, "submit")
+        sendNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    Log.d(TAG, "Ghost type '$text': $result")
+    return result
+}
+
+private fun findEditableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+    node ?: return null
+    if (node.isEditable) return node
+    for (i in 0 until node.childCount) {
+        findEditableNode(node.getChild(i))?.let { return it }
+    }
+    return null
+}
 
     // ── Click element by content description ─────────────────
     fun tapElement(description: String): Boolean {
