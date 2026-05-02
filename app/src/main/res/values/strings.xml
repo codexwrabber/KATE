@@ -1,4 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Kate</string>
-    <string name="accessibility_desc">Kate assistant monitors app usage to improve suggestions</string>
+    <string name="accessibility_desc">Kate uses accessibility to read screen content, navigate apps, and type on your behalf using voice commands.</string>
 </resources>
