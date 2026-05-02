@@ -38,6 +38,7 @@ class KateSpeechManager(
         Thread { initModel() }.start()
     }
 
+    // ✅ FIXED: Only one initModel function remains
     private fun initModel() {
         try {
             val modelDir = File(context.filesDir, "vosk-model")
@@ -46,81 +47,57 @@ class KateSpeechManager(
                 copyAssets("model", modelDir)
             }
             if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
-                onError?.invoke("Model not found")
-                return
+                onError?.invoke("Model not found"); return
             }
-            model      = Model(modelDir.absolutePath)
-            recognizer = Recognizer(model, 16000.0f)
+
+            model = Model(modelDir.absolutePath)
+
+            val grammar = """
+                ["hey kate", "okay kate",
+                 "open", "launch", "close",
+                 "call", "dial", "text", "send message to",
+                 "play music", "music", "youtube", "spotify",
+                 "search for", "google", "navigate to",
+                 "torch on", "torch off", "flashlight on", "flashlight off",
+                 "turn on torch", "turn off torch",
+                 "volume up", "volume down", "mute", "unmute",
+                 "do not disturb on", "do not disturb off", "silence",
+                 "go back", "go home", "recent apps",
+                 "show notifications", "take screenshot",
+                 "read screen", "type", "write",
+                 "what time", "what date", "today's date",
+                 "hello", "hi kate", "how are you",
+                 "what can you do", "help",
+                 "open browser", "open chrome", "open whatsapp",
+                 "open instagram", "open facebook", "open settings",
+                 "stop listening", "goodbye kate", "bye kate",
+                 "remind me", "set reminder", "set alarm",
+                 "weather", "news",
+                 "[unk]"]
+            """.trimIndent()
+
+            recognizer = Recognizer(model, 16000.0f, grammar)
             isReady.set(true)
-            Log.d("KateSpeech", "✅ Model loaded")
+            Log.d("KateSpeech", "✅ VOSK model + grammar loaded")
+
         } catch (e: Exception) {
-            Log.e("KateSpeech", "Model init failed: ${e.message}")
-            onError?.invoke("Model init failed: ${e.message}")
+            Log.w("KateSpeech", "Grammar failed, loading without: ${e.message}")
+            try {
+                recognizer = Recognizer(model, 16000.0f)
+                isReady.set(true)
+                Log.d("KateSpeech", "✅ VOSK model loaded (no grammar)")
+            } catch (e2: Exception) {
+                onError?.invoke("Model init failed: ${e2.message}")
+            }
         }
     }
 
-private fun initModel() {
-    try {
-        val modelDir = File(context.filesDir, "vosk-model")
-        if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
-            Log.d("KateSpeech", "Copying model from assets...")
-            copyAssets("model", modelDir)
-        }
-        if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
-            onError?.invoke("Model not found"); return
-        }
-
-        model = Model(modelDir.absolutePath)
-
-        // Grammar restricts recognition to known commands
-        // This massively improves accuracy for non-native accents
-        val grammar = """
-            ["hey kate", "okay kate",
-             "open", "launch", "close",
-             "call", "dial", "text", "send message to",
-             "play music", "music", "youtube", "spotify",
-             "search for", "google", "navigate to",
-             "torch on", "torch off", "flashlight on", "flashlight off",
-             "turn on torch", "turn off torch",
-             "volume up", "volume down", "mute", "unmute",
-             "do not disturb on", "do not disturb off", "silence",
-             "go back", "go home", "recent apps",
-             "show notifications", "take screenshot",
-             "read screen", "type", "write",
-             "what time", "what date", "today's date",
-             "hello", "hi kate", "how are you",
-             "what can you do", "help",
-             "open browser", "open chrome", "open whatsapp",
-             "open instagram", "open facebook", "open settings",
-             "stop listening", "goodbye kate", "bye kate",
-             "remind me", "set reminder", "set alarm",
-             "weather", "news",
-             "[unk]"]
-        """.trimIndent()
-
-        recognizer = Recognizer(model, 16000.0f, grammar)
-        isReady.set(true)
-        Log.d("KateSpeech", "✅ VOSK model + grammar loaded")
-
-    } catch (e: Exception) {
-        // Fallback — load without grammar
-        Log.w("KateSpeech", "Grammar failed, loading without: ${e.message}")
-        try {
-            recognizer = Recognizer(model, 16000.0f)
-            isReady.set(true)
-            Log.d("KateSpeech", "✅ VOSK model loaded (no grammar)")
-        } catch (e2: Exception) {
-            onError?.invoke("Model init failed: ${e2.message}")
-        }
-    }
-}
-    
     private fun copyAssets(assetPath: String, destDir: File) {
         destDir.mkdirs()
         val assets = context.assets.list(assetPath) ?: return
         for (asset in assets) {
-            val src      = "$assetPath/$asset"
-            val dst      = File(destDir, asset)
+            val src = "$assetPath/$asset"
+            val dst = File(destDir, asset)
             val children = context.assets.list(src)
             if (!children.isNullOrEmpty()) {
                 copyAssets(src, dst)
@@ -158,11 +135,11 @@ private fun initModel() {
         }
 
         val record = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION, // better for speech
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
             sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
-            bufferSize * 4  // larger buffer = more stable
+            bufferSize * 4
         )
 
         if (record.state != AudioRecord.STATE_INITIALIZED) {
@@ -185,58 +162,39 @@ private fun initModel() {
         thread = Thread {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             val buffer = ByteArray(bufferSize)
-            Log.d("KateSpeech", "Loop started")
 
             while (isRunning.get()) {
                 try {
-                    if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                        Thread.sleep(200)
-                        continue
-                    }
-
                     val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
-                    if (read <= 0) continue
-                    if (isSpeaking.get()) continue
+                    if (read <= 0 || isSpeaking.get()) continue
 
-                    // Feed to VOSK
                     val accepted = recognizer?.acceptWaveForm(buffer, read) ?: false
 
                     if (accepted) {
-                        val json = recognizer?.result ?: "{}"
-                        val text = JSONObject(json)
+                        val text = JSONObject(recognizer?.result ?: "{}")
                             .optString("text", "")
                             .lowercase().trim()
-                        if (text.length > 2) {
-                            Log.d("KateSpeech", "✅ Final: $text")
-                            handleResult(text)
-                        }
+
+                        if (text.length > 2) handleResult(text)
                     } else {
-                        val json    = recognizer?.partialResult ?: "{}"
-                        val partial = JSONObject(json)
+                        val partial = JSONObject(recognizer?.partialResult ?: "{}")
                             .optString("partial", "")
                             .lowercase().trim()
-                        if (partial.isNotBlank()) {
-                            Log.d("KateSpeech", "Partial: $partial")
-                        }
-                        // Wake word on partial for fast response
+
                         if ((partial.contains("hey kate") ||
                              partial.contains("hey cat") ||
                              partial.contains("okay kate")) && !wakeMode.get()) {
-                            Log.d("KateSpeech", "🔔 Wake word: $partial")
                             wakeMode.set(true)
                             onResult("WAKE")
                         }
                     }
 
-                    // Reset watchdog — loop is alive
                     resetWatchdog()
 
                 } catch (e: Exception) {
-                    Log.e("KateSpeech", "Loop error: ${e.message}")
                     Thread.sleep(200)
                 }
             }
-            Log.d("KateSpeech", "Loop ended")
         }
         thread?.start()
     }
@@ -257,13 +215,9 @@ private fun initModel() {
         }
     }
 
-    // ── Watchdog — restarts mic if it goes silent ────────────
     private fun startWatchdog() {
         watchdogRunnable = Runnable {
-            if (isRunning.get()) {
-                Log.w("KateSpeech", "Watchdog triggered — restarting mic")
-                restartListening()
-            }
+            if (isRunning.get()) restartListening()
         }
         resetWatchdog()
     }
@@ -271,7 +225,7 @@ private fun initModel() {
     private fun resetWatchdog() {
         watchdogRunnable?.let {
             watchdogHandler.removeCallbacks(it)
-            watchdogHandler.postDelayed(it, 30000) // restart if silent for 30s
+            watchdogHandler.postDelayed(it, 30000)
         }
     }
 
@@ -288,8 +242,7 @@ private fun initModel() {
 
     fun setSpeaking(state: Boolean) {
         isSpeaking.set(state)
-        if (!state) resetWatchdog() // reset watchdog after speaking
-        Log.d("KateSpeech", "Speaking: $state")
+        if (!state) resetWatchdog()
     }
 
     fun isListening(): Boolean = isRunning.get()
@@ -299,18 +252,17 @@ private fun initModel() {
         isRunning.set(false)
         wakeMode.set(false)
         stopWatchdog()
-        try { audioRecord?.stop(); audioRecord?.release() } catch (e: Exception) { }
+        try { audioRecord?.stop(); audioRecord?.release() } catch (_: Exception) {}
         audioRecord = null
-        try { thread?.join(1000) } catch (e: InterruptedException) { thread?.interrupt() }
+        try { thread?.join(1000) } catch (_: InterruptedException) { thread?.interrupt() }
         thread = null
-        Log.d("KateSpeech", "Stopped")
     }
 
     fun shutdown() {
         stopListening()
-        try { recognizer?.close(); model?.close() } catch (e: Exception) { }
+        try { recognizer?.close(); model?.close() } catch (_: Exception) {}
         recognizer = null
-        model      = null
+        model = null
         isReady.set(false)
     }
 }
