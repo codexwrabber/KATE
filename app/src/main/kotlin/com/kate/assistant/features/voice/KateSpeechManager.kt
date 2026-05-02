@@ -59,6 +59,62 @@ class KateSpeechManager(
         }
     }
 
+private fun initModel() {
+    try {
+        val modelDir = File(context.filesDir, "vosk-model")
+        if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
+            Log.d("KateSpeech", "Copying model from assets...")
+            copyAssets("model", modelDir)
+        }
+        if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
+            onError?.invoke("Model not found"); return
+        }
+
+        model = Model(modelDir.absolutePath)
+
+        // Grammar restricts recognition to known commands
+        // This massively improves accuracy for non-native accents
+        val grammar = """
+            ["hey kate", "okay kate",
+             "open", "launch", "close",
+             "call", "dial", "text", "send message to",
+             "play music", "music", "youtube", "spotify",
+             "search for", "google", "navigate to",
+             "torch on", "torch off", "flashlight on", "flashlight off",
+             "turn on torch", "turn off torch",
+             "volume up", "volume down", "mute", "unmute",
+             "do not disturb on", "do not disturb off", "silence",
+             "go back", "go home", "recent apps",
+             "show notifications", "take screenshot",
+             "read screen", "type", "write",
+             "what time", "what date", "today's date",
+             "hello", "hi kate", "how are you",
+             "what can you do", "help",
+             "open browser", "open chrome", "open whatsapp",
+             "open instagram", "open facebook", "open settings",
+             "stop listening", "goodbye kate", "bye kate",
+             "remind me", "set reminder", "set alarm",
+             "weather", "news",
+             "[unk]"]
+        """.trimIndent()
+
+        recognizer = Recognizer(model, 16000.0f, grammar)
+        isReady.set(true)
+        Log.d("KateSpeech", "✅ VOSK model + grammar loaded")
+
+    } catch (e: Exception) {
+        // Fallback — load without grammar
+        Log.w("KateSpeech", "Grammar failed, loading without: ${e.message}")
+        try {
+            recognizer = Recognizer(model, 16000.0f)
+            isReady.set(true)
+            Log.d("KateSpeech", "✅ VOSK model loaded (no grammar)")
+        } catch (e2: Exception) {
+            onError?.invoke("Model init failed: ${e2.message}")
+        }
+    }
+}
+    
     private fun copyAssets(assetPath: String, destDir: File) {
         destDir.mkdirs()
         val assets = context.assets.list(assetPath) ?: return
