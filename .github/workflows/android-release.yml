@@ -33,6 +33,17 @@ jobs:
       - name: Clean build
         run: ./gradlew clean
 
+      - name: Download VOSK model
+        run: |
+          mkdir -p app/src/main/assets/model
+          curl -L "https://alphacephei.com/vosk/models/vosk-model-en-us-0.22-lgraph.zip" \
+            -o vosk-model.zip
+          unzip vosk-model.zip -d vosk-tmp
+          cp -r vosk-tmp/vosk-model-en-us-0.22-lgraph/. app/src/main/assets/model/
+          rm -rf vosk-tmp vosk-model.zip
+          echo "Model files:"
+          ls app/src/main/assets/model/
+
       - name: Build & sign release APK
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/kate.jks
