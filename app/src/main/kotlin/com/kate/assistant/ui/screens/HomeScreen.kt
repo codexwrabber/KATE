@@ -1,6 +1,7 @@
 package com.kate.assistant.ui.screens
 
 import android.content.Intent
+import android.net.Uri
 import android.provider.Settings
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -31,30 +32,26 @@ fun HomeScreen() {
         KateEventBus.subscribe { event ->
             when (event) {
                 is KateEvent.Error -> statusText = event.message
-                else -> Unit
+                else               -> Unit
             }
         }
     }
 
     val pulse = rememberInfiniteTransition(label = "pulse")
     val scale by pulse.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.12f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "scale"
+        initialValue  = 1f,
+        targetValue   = 1.12f,
+        animationSpec = infiniteRepeatable(tween(1200), RepeatMode.Reverse),
+        label         = "scale"
     )
 
     Box(
-        modifier = Modifier
+        modifier          = Modifier
             .fillMaxSize()
             .background(KateDark),
-        contentAlignment = Alignment.Center
+        contentAlignment  = Alignment.Center
     ) {
-
-        // Glow ring
+        // Outer glow ring
         Box(
             modifier = Modifier
                 .size(200.dp)
@@ -62,78 +59,78 @@ fun HomeScreen() {
                 .background(KateCyan.copy(alpha = 0.08f), CircleShape)
         )
 
-        // Core orb
+        // Inner orb
         Box(
-            modifier = Modifier
+            modifier         = Modifier
                 .size(120.dp)
                 .background(KateCyan.copy(alpha = 0.18f), CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = "K",
-                color = KateCyan,
-                fontSize = 48.sp,
+                text       = "K",
+                color      = KateCyan,
+                fontSize   = 48.sp,
                 fontWeight = FontWeight.Bold
             )
         }
 
-        // Bottom info
+        // Bottom section
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 48.dp, horizontal = 24.dp),
+                .padding(PaddingValues(
+                    start  = 24.dp,
+                    end    = 24.dp,
+                    bottom = 48.dp
+                )),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-
             Text(
-                text = "K.A.T.E",
-                color = KateCyan,
-                fontSize = 22.sp,
+                text       = "K.A.T.E",
+                color      = KateCyan,
+                fontSize   = 22.sp,
                 fontWeight = FontWeight.Bold
             )
 
             Spacer(Modifier.height(6.dp))
 
             Text(
-                text = statusText,
-                color = KateText.copy(alpha = 0.6f),
-                fontSize = 13.sp,
+                text      = statusText,
+                color     = KateText.copy(alpha = 0.6f),
+                fontSize  = 13.sp,
                 textAlign = TextAlign.Center,
-                maxLines = 2
+                maxLines  = 2
             )
 
             Spacer(Modifier.height(16.dp))
 
+            // Accessibility guide card
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { showAccessibilityGuide = !showAccessibilityGuide },
-                shape = RoundedCornerShape(12.dp),
+                shape  = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(containerColor = KateSurface)
             ) {
-
                 Column(modifier = Modifier.padding(16.dp)) {
-
                     Text(
-                        text = "⚙ Enable Accessibility",
-                        color = KateCyan,
-                        fontSize = 14.sp,
+                        text       = "⚙ Enable Accessibility",
+                        color      = KateCyan,
+                        fontSize   = 14.sp,
                         fontWeight = FontWeight.Bold
                     )
 
                     if (showAccessibilityGuide) {
-
                         Spacer(Modifier.height(8.dp))
 
                         Text(
-                            text =
-                                "1. Tap below to open Accessibility Settings\n" +
-                                "2. Tap \"Kate Assistant\" → you'll see 'Restricted'\n" +
-                                "3. Go back → Settings → Apps → Kate\n" +
-                                "4. Tap ⋮ menu → \"Allow restricted settings\"\n" +
-                                "5. Return to Accessibility → Enable Kate Assistant",
-                            color = KateText.copy(alpha = 0.8f),
-                            fontSize = 12.sp,
+                            text = "1. Tap below → open Accessibility Settings\n" +
+                                   "2. Tap \"Kate Assistant\" → see 'Restricted'\n" +
+                                   "3. Go back → Settings → Apps → Kate\n" +
+                                   "4. Tap ⋮ menu → \"Allow restricted settings\"\n" +
+                                   "5. Return to Accessibility → Enable Kate",
+                            color      = KateText.copy(alpha = 0.8f),
+                            fontSize   = 12.sp,
                             lineHeight = 18.sp
                         )
 
@@ -151,8 +148,8 @@ fun HomeScreen() {
                             )
                         ) {
                             Text(
-                                text = "Open Accessibility Settings",
-                                color = KateDark,
+                                text       = "Open Accessibility Settings",
+                                color      = KateDark,
                                 fontWeight = FontWeight.Bold
                             )
                         }
@@ -162,8 +159,10 @@ fun HomeScreen() {
                         OutlinedButton(
                             onClick = {
                                 context.startActivity(
-                                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                        data = android.net.Uri.parse("package:${context.packageName}")
+                                    Intent(
+                                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                                    ).apply {
+                                        data = Uri.parse("package:${context.packageName}")
                                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                     }
                                 )
@@ -172,7 +171,10 @@ fun HomeScreen() {
                                 contentColor = KateCyan
                             )
                         ) {
-                            Text("Open Kate App Info (Allow restricted settings here)")
+                            Text(
+                                text     = "Kate App Info → Allow restricted settings",
+                                fontSize = 11.sp
+                            )
                         }
                     }
                 }
