@@ -140,14 +140,13 @@ class KateService : Service() {
     }
 
     // ── Speak — pauses mic while Kate talks ──────────────────
-    // FIXED: Line 175 - removed boolean expectation since setSpeaking returns Unit
     private fun speak(text: String, delayMs: Long = -1L) {
         speechManager.setSpeaking(true)
         tts.speak(text)
         val words = text.split(" ").size
         val delay = if (delayMs > 0) delayMs else (words * 400L + 800L)
         mainHandler.postDelayed({
-            speechManager.setSpeaking(false)  // ← This was line 175 - now fixed
+            speechManager.setSpeaking(false)
         }, delay)
     }
 
@@ -367,7 +366,7 @@ class KateService : Service() {
 
             lower.contains("what's your name") ||
             lower.contains("who are you") -> {
-                speak("I'm Kate. Your Kernel-level Autonomous Task Engine and Personal assistant.")
+                speak("I'm Kate. Your Kernel-level Autonomous Task Engine.")
             }
 
             // ── Time / Date ───────────────────────────────────
@@ -381,7 +380,7 @@ class KateService : Service() {
 
             lower.contains("what date")    ||
             lower.contains("today's date") ||
-            lower.contains("what day") -> {
+            lower.contains("what day")     -> {
                 val date = java.text.SimpleDateFormat(
                     "EEEE, MMMM d yyyy", java.util.Locale.getDefault())
                     .format(java.util.Date())
@@ -392,6 +391,7 @@ class KateService : Service() {
             lower.contains("go back") -> {
                 if (KateAccessibilityService.instance != null) {
                     KateAccessibilityService.instance?.goBack()
+                    Unit
                 } else {
                     speak("Please enable Kate accessibility service first")
                 }
@@ -400,6 +400,7 @@ class KateService : Service() {
             lower.contains("go home") -> {
                 if (KateAccessibilityService.instance != null) {
                     KateAccessibilityService.instance?.goHome()
+                    Unit
                 } else {
                     speak("Please enable Kate accessibility service first")
                 }
@@ -409,6 +410,7 @@ class KateService : Service() {
             lower.contains("open notifications") -> {
                 if (KateAccessibilityService.instance != null) {
                     KateAccessibilityService.instance?.showNotifications()
+                    Unit
                 } else {
                     speak("Accessibility service not enabled")
                 }
@@ -427,6 +429,7 @@ class KateService : Service() {
             lower.contains("show recents") -> {
                 if (KateAccessibilityService.instance != null) {
                     KateAccessibilityService.instance?.openRecents()
+                    Unit
                 } else {
                     speak("Accessibility service not enabled")
                 }
@@ -476,10 +479,13 @@ class KateService : Service() {
                     Log.d("Kate", "TFLite: $intent")
                     when (intent) {
                         "OPEN_APP"       -> speak("Which app should I open?")
-                        "MEDIA_CONTROL"  -> { speak("Opening music"); launcher.openMusicApp() }
+                        "MEDIA_CONTROL"  -> {
+                            speak("Opening music")
+                            launcher.openMusicApp()
+                        }
                         "COMMUNICATION"  -> speak("Who should I contact?")
                         "REMINDER"       -> speak("When should I remind you?")
-                        "SYSTEM_CONTROL" -> speak("What system setting would you like to change?")
+                        "SYSTEM_CONTROL" -> speak("What system setting?")
                         else             -> speak("I didn't catch that. Try again.")
                     }
                 }
