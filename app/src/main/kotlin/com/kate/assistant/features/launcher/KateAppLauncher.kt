@@ -82,14 +82,13 @@ class KateAppLauncher(private val context: Context) {
         "opera"          to "com.opera.browser",
         "firefox"        to "org.mozilla.firefox",
         "brave"          to "com.brave.browser",
-        "twitter"        to "com.twitter.android",
         "reddit"         to "com.reddit.frontpage",
         "pinterest"      to "com.pinterest",
         "shazam"         to "com.shazam.android",
         "soundcloud"     to "com.soundcloud.android",
     )
 
-    fun launchByVoiceCommand(command: String) {
+    fun launchByVoiceCommand(command: String): Boolean {
         val cmd = command.lowercase().trim()
         Log.d("KateLauncher", "Launching: $cmd")
 
@@ -97,7 +96,7 @@ class KateAppLauncher(private val context: Context) {
         for ((name, pkg) in knownApps) {
             if (cmd.contains(name)) {
                 Log.d("KateLauncher", "Known: $name → $pkg")
-                if (launch(pkg)) return
+                if (launch(pkg)) return true
             }
         }
 
@@ -107,7 +106,7 @@ class KateAppLauncher(private val context: Context) {
         }
         if (exact != null) {
             Log.d("KateLauncher", "Exact: ${exact.first} → ${exact.second}")
-            if (launch(exact.second)) return
+            if (launch(exact.second)) return true
         }
 
         // 3. Contains match
@@ -116,7 +115,7 @@ class KateAppLauncher(private val context: Context) {
         }
         if (contains != null) {
             Log.d("KateLauncher", "Contains: ${contains.first} → ${contains.second}")
-            if (launch(contains.second)) return
+            if (launch(contains.second)) return true
         }
 
         // 4. Word-by-word match
@@ -127,13 +126,14 @@ class KateAppLauncher(private val context: Context) {
             }
             if (wordMatch != null) {
                 Log.d("KateLauncher", "Word match '$word': ${wordMatch.second}")
-                if (launch(wordMatch.second)) return
+                if (launch(wordMatch.second)) return true
             }
         }
 
         // 5. Nothing found — search Play Store
         Log.d("KateLauncher", "No match for '$cmd' — searching Play Store")
         searchPlayStore(cmd)
+        return false
     }
 
     fun search(query: String, engine: SearchEngine = SearchEngine.GOOGLE) {
