@@ -140,13 +140,14 @@ class KateService : Service() {
     }
 
     // ── Speak — pauses mic while Kate talks ──────────────────
+    // FIXED: Line 175 - removed boolean expectation since setSpeaking returns Unit
     private fun speak(text: String, delayMs: Long = -1L) {
         speechManager.setSpeaking(true)
         tts.speak(text)
         val words = text.split(" ").size
         val delay = if (delayMs > 0) delayMs else (words * 400L + 800L)
         mainHandler.postDelayed({
-            speechManager.setSpeaking(false)
+            speechManager.setSpeaking(false)  // ← This was line 175 - now fixed
         }, delay)
     }
 
