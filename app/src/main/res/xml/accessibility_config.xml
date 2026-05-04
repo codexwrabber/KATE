@@ -3,9 +3,8 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeNotificationStateChanged|typeViewFocused"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagReportViewIds|flagRequestEnhancedWebAccessibility"
+    android:accessibilityFlags="flagDefault|flagReportViewIds|flagRequestEnhancedWebAccessibility|flagRetrieveInteractiveWindows"
     android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_desc"
-    android:notificationTimeout="100"
-    android:settingsActivity="com.kate.assistant.ui.MainActivity" />
+    android:notificationTimeout="100" />
