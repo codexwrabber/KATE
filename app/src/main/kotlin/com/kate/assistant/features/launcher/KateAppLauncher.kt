@@ -3,44 +3,52 @@ package com.kate.assistant.features.launcher
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.pm.ResolveInfo
 import android.net.Uri
 import android.util.Log
 
 class KateAppLauncher(private val context: Context) {
     private val pm = context.packageManager
 
-    // All launchable apps cached at startup
+    // All launchable apps — queried properly
     private val launchableApps: List<Pair<String, String>> by lazy {
-        val intent  = Intent(Intent.ACTION_MAIN, null).apply {
+        val intent = Intent(Intent.ACTION_MAIN, null).apply {
             addCategory(Intent.CATEGORY_LAUNCHER)
         }
-        pm.queryIntentActivities(intent, 0).map { info ->
-            Pair(
-                info.loadLabel(pm).toString().lowercase().trim(),
-                info.activityInfo.packageName
-            )
-        }.also { Log.d("KateLauncher", "Cached ${it.size} apps") }
+        pm.queryIntentActivities(intent, PackageManager.GET_META_DATA)
+            .map { info ->
+                Pair(
+                    info.loadLabel(pm).toString().lowercase().trim(),
+                    info.activityInfo.packageName
+                )
+            }
+            .distinctBy { it.second }
+            .also { Log.d("KateLauncher", "Found ${it.size} launchable apps") }
     }
 
-    // Known apps with alternate name mappings
+    // Known apps map with alternates
     private val knownApps = mapOf(
         "whatsapp"       to "com.whatsapp",
+        "watsapp"        to "com.whatsapp",
+        "what's app"     to "com.whatsapp",
         "youtube"        to "com.google.android.youtube",
+        "you tube"       to "com.google.android.youtube",
         "spotify"        to "com.spotify.music",
         "instagram"      to "com.instagram.android",
+        "insta"          to "com.instagram.android",
         "facebook"       to "com.facebook.katana",
         "fb"             to "com.facebook.katana",
         "twitter"        to "com.twitter.android",
-        "x"              to "com.twitter.android",
         "tiktok"         to "com.zhiliaoapp.musically",
+        "tick tock"      to "com.zhiliaoapp.musically",
         "chrome"         to "com.android.chrome",
         "browser"        to "com.android.chrome",
         "camera"         to "com.android.camera2",
         "gallery"        to "com.android.gallery3d",
         "photos"         to "com.google.android.apps.photos",
         "settings"       to "com.android.settings",
+        "setting"        to "com.android.settings",
         "calculator"     to "com.android.calculator2",
+        "calculate"      to "com.android.calculator2",
         "calendar"       to "com.android.calendar",
         "clock"          to "com.android.deskclock",
         "alarm"          to "com.android.deskclock",
@@ -51,34 +59,35 @@ class KateAppLauncher(private val context: Context) {
         "files"          to "com.google.android.apps.nbu.files",
         "file manager"   to "com.google.android.apps.nbu.files",
         "play store"     to "com.android.vending",
+        "playstore"      to "com.android.vending",
         "store"          to "com.android.vending",
         "phone"          to "com.android.dialer",
         "dialer"         to "com.android.dialer",
         "messages"       to "com.google.android.apps.messaging",
         "sms"            to "com.google.android.apps.messaging",
         "contacts"       to "com.android.contacts",
+        "contact"        to "com.android.contacts",
         "audiomack"      to "com.audiomack.audiomack",
+        "audio mack"     to "com.audiomack.audiomack",
         "netflix"        to "com.netflix.mediaclient",
         "telegram"       to "org.telegram.messenger",
         "snapchat"       to "com.snapchat.android",
+        "snap"           to "com.snapchat.android",
         "claude"         to "com.anthropic.claude",
         "chatgpt"        to "com.openai.chatgpt",
+        "chat gpt"       to "com.openai.chatgpt",
         "deepseek"       to "com.deepseek.chat",
-        "music"          to "com.audiomack.audiomack",
-        "notepad"        to "com.google.android.keep",
+        "deep seek"      to "com.deepseek.chat",
         "notes"          to "com.google.android.keep",
         "keep"           to "com.google.android.keep",
         "youtube music"  to "com.google.android.youtube.music",
         "zoom"           to "us.zoom.videomeetings",
         "meet"           to "com.google.android.apps.meetings",
         "google meet"    to "com.google.android.apps.meetings",
-        "microsoft word" to "com.microsoft.office.word",
         "word"           to "com.microsoft.office.word",
         "excel"          to "com.microsoft.office.excel",
         "powerpoint"     to "com.microsoft.office.powerpoint",
         "linkedin"       to "com.linkedin.android",
-        "amazon"         to "com.amazon.mShop.android.shopping",
-        "uber"           to "com.ubercab",
         "opera"          to "com.opera.browser",
         "firefox"        to "org.mozilla.firefox",
         "brave"          to "com.brave.browser",
@@ -86,47 +95,50 @@ class KateAppLauncher(private val context: Context) {
         "pinterest"      to "com.pinterest",
         "shazam"         to "com.shazam.android",
         "soundcloud"     to "com.soundcloud.android",
+        "twitter"        to "com.twitter.android",
+        "codespaces"     to "com.github.android",
+        "github"         to "com.github.android",
+        "lite"           to "com.facebook.lite",
+        "facebook lite"  to "com.facebook.lite",
     )
 
     fun launchByVoiceCommand(command: String): Boolean {
         val cmd = command.lowercase().trim()
-        Log.d("KateLauncher", "Launching: $cmd")
+        Log.d("KateLauncher", "Launch command: '$cmd'")
 
-        // 1. Check known apps map
+        // 1. Known apps map — fastest and most reliable
         for ((name, pkg) in knownApps) {
             if (cmd.contains(name)) {
-                Log.d("KateLauncher", "Known: $name → $pkg")
-                if (launch(pkg)) return true
+                Log.d("KateLauncher", "Known match: $name → $pkg")
+                if (isInstalled(pkg) && launch(pkg)) return true
             }
         }
 
-        // 2. Exact label match from installed apps
-        val exact = launchableApps.firstOrNull { (label, _) ->
-            label == cmd
-        }
+        // 2. Exact label match
+        val exact = launchableApps.firstOrNull { (label, _) -> label == cmd }
         if (exact != null) {
             Log.d("KateLauncher", "Exact: ${exact.first} → ${exact.second}")
             if (launch(exact.second)) return true
         }
 
-        // 3. Contains match
+        // 3. Label contains command
         val contains = launchableApps.firstOrNull { (label, _) ->
-            cmd.contains(label) || label.contains(cmd)
+            label.contains(cmd) || cmd.contains(label)
         }
         if (contains != null) {
             Log.d("KateLauncher", "Contains: ${contains.first} → ${contains.second}")
             if (launch(contains.second)) return true
         }
 
-        // 4. Word-by-word match
-        val words = cmd.split(" ").filter { it.length > 2 }
+        // 4. Word-by-word match — ignore short words
+        val words = cmd.split(" ").filter { it.length > 3 }
         for (word in words) {
-            val wordMatch = launchableApps.firstOrNull { (label, _) ->
+            val match = launchableApps.firstOrNull { (label, _) ->
                 label.contains(word)
             }
-            if (wordMatch != null) {
-                Log.d("KateLauncher", "Word match '$word': ${wordMatch.second}")
-                if (launch(wordMatch.second)) return true
+            if (match != null) {
+                Log.d("KateLauncher", "Word '$word': ${match.first} → ${match.second}")
+                if (launch(match.second)) return true
             }
         }
 
@@ -156,7 +168,9 @@ class KateAppLauncher(private val context: Context) {
             "com.soundcloud.android",
             "com.apple.android.music"
         )
-        music.firstOrNull { isInstalled(it) }?.let { launch(it) } ?: search("music player")
+        val found = music.firstOrNull { isInstalled(it) }
+        if (found != null) launch(found)
+        else search("music player")
     }
 
     private fun searchPlayStore(query: String) {
@@ -186,6 +200,7 @@ class KateAppLauncher(private val context: Context) {
                 ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             if (intent != null) {
                 context.startActivity(intent)
+                Log.d("KateLauncher", "Launched: $packageName")
                 true
             } else {
                 Log.w("KateLauncher", "No launch intent: $packageName")
