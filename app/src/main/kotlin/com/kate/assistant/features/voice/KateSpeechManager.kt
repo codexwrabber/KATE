@@ -15,7 +15,6 @@ import org.vosk.Recognizer
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.sqrt
 
 class KateSpeechManager(
     private val context: Context,
@@ -32,12 +31,12 @@ class KateSpeechManager(
     private val isSpeaking   = AtomicBoolean(false)
     private val isModelReady = AtomicBoolean(false)
 
-    // Energy gate — tune this if too sensitive or not sensitive enough
-    // Higher = ignores more noise. Lower = picks up quieter speech.
-    private val ENERGY_THRESHOLD = 500.0
+    // ── No energy gate ────────────────────────────────────────
+    // VOSK has built-in VAD — an external energy gate causes latency
+    // by dropping the attack phase (first 100-200 ms) of each utterance.
+    // REMOVED: was causing the speech delay bug.
 
     init {
-        // Load model on dedicated background thread
         Thread {
             Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
             initModel()
@@ -48,18 +47,18 @@ class KateSpeechManager(
         try {
             val modelDir = File(context.filesDir, "vosk-model")
             if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
-                Log.d(TAG, "Copying model from assets...")
+                Log.d(TAG, "Copying VOSK model from assets...")
                 copyAssets("model", modelDir)
                 Log.d(TAG, "Model copied ✅")
             }
             if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
-                onError?.invoke("VOSK model missing from assets folder")
+                onError?.invoke("VOSK model missing from assets")
                 return
             }
             model      = Model(modelDir.absolutePath)
             recognizer = Recognizer(model, SAMPLE_RATE.toFloat())
             isModelReady.set(true)
-            Log.d(TAG, "✅ VOSK model loaded — ready to listen")
+            Log.d(TAG, "✅ VOSK ready")
         } catch (e: Exception) {
             Log.e(TAG, "Model init failed: ${e.message}")
             onError?.invoke("Model failed: ${e.message}")
@@ -82,16 +81,6 @@ class KateSpeechManager(
         }
     }
 
-    // ── RMS energy — reject silence/noise ────────────────────
-    private fun energy(buf: ByteArray, len: Int): Double {
-        var sum = 0.0; var i = 0
-        while (i < len - 1) {
-            val s = ((buf[i + 1].toInt() shl 8) or (buf[i].toInt() and 0xFF)).toShort()
-            sum  += s * s.toDouble(); i += 2
-        }
-        return sqrt(sum / (len / 2))
-    }
-
     fun startListening() {
         if (isRunning.get()) return
         if (!isModelReady.get()) {
@@ -101,26 +90,28 @@ class KateSpeechManager(
         }
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) {
-            onError?.invoke("RECORD_AUDIO not granted")
+            onError?.invoke("RECORD_AUDIO permission not granted")
             return
         }
 
-        val minBuf  = AudioRecord.getMinBufferSize(
+        // minBuf sized buffer — smaller chunks = lower VOSK latency
+        val minBuf = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        if (minBuf <= 0) { onError?.invoke("Bad buffer size"); return }
-        val bufSize = minBuf * 2
+        if (minBuf <= 0) { onError?.invoke("Bad AudioRecord buffer size"); return }
 
         val ar = AudioRecord(
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
-            SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT, bufSize
+            SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            minBuf * 4   // Internal ring buffer: 4x for stability, read chunk stays small
         )
         if (ar.state != AudioRecord.STATE_INITIALIZED) {
-            ar.release(); onError?.invoke("AudioRecord failed"); return
+            ar.release(); onError?.invoke("AudioRecord failed to init"); return
         }
 
         try { ar.startRecording() } catch (e: Exception) {
-            ar.release(); onError?.invoke("Mic failed: ${e.message}"); return
+            ar.release(); onError?.invoke("Mic open failed: ${e.message}"); return
         }
 
         audioRecord = ar
@@ -128,56 +119,74 @@ class KateSpeechManager(
 
         listenThread = Thread {
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-            // Use minBuf chunk — smaller = lower latency per VOSK docs
+
+            // Read in minBuf chunks — optimal for VOSK low-latency operation
             val buf = ByteArray(minBuf)
-            Log.d(TAG, "🎤 Listen loop running")
+            Log.d(TAG, "🎤 Listening...")
 
             while (isRunning.get()) {
                 try {
                     if (ar.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                        Thread.sleep(50); continue
+                        Thread.sleep(20); continue
                     }
+
                     val read = ar.read(buf, 0, buf.size)
-                    if (read <= 0 || isSpeaking.get()) continue
+                    if (read <= 0) { Thread.sleep(10); continue }
 
-                    // Energy gate — skip noise
-                    if (energy(buf, read) < ENERGY_THRESHOLD) continue
+                    // Pause input processing while Kate is speaking (mic stays open
+                    // to avoid AudioRecord underflows, we just don't feed VOSK)
+                    if (isSpeaking.get()) continue
 
-                    val final = recognizer?.acceptWaveForm(buf, read) ?: false
-                    if (final) {
+                    val isFinal = recognizer?.acceptWaveForm(buf, read) ?: false
+
+                    if (isFinal) {
                         val text = JSONObject(recognizer?.result ?: "{}")
-                            .optString("text", "").trim().lowercase()
-                        if (text.length > 2 && text != "[unk]") {
-                            Log.d(TAG, "✅ $text")
-                            onResult(text)
+                            .optString("text", "").trim()
+                        if (text.length > 2 && text != "[unk]" && text.isNotBlank()) {
+                            Log.d(TAG, "✅ Final: $text")
+                            handler.post { onResult(text) }
                         }
                     } else {
+                        // Check partial for wake word — gives ~300ms faster wake response
                         val partial = JSONObject(recognizer?.partialResult ?: "{}")
-                            .optString("partial", "").trim().lowercase()
-                        if (partial.isNotBlank() && partial != "[unk]" && isWakeWord(partial)) {
+                            .optString("partial", "").trim()
+                        if (partial.isNotBlank() && isWakeWord(partial)) {
                             Log.d(TAG, "🔔 Wake partial: $partial")
-                            onResult("WAKE")
+                            handler.post { onResult("WAKE") }
+                            recognizer?.reset()  // Flush after wake so full command starts fresh
                         }
                     }
+                } catch (e: InterruptedException) {
+                    break
                 } catch (e: Exception) {
-                    if (isRunning.get()) Log.e(TAG, "Loop: ${e.message}")
-                    Thread.sleep(50)
+                    if (isRunning.get()) Log.e(TAG, "Listen loop error: ${e.message}")
+                    Thread.sleep(30)
                 }
             }
-            Log.d(TAG, "Loop ended")
+            Log.d(TAG, "Listen loop ended")
         }.also { it.name = "kate-listen"; it.start() }
     }
 
-    private fun isWakeWord(t: String) =
-        t.contains("hey kate") || t.contains("hey cat") ||
-        t.contains("okay kate") || t.contains("hi kate")
+    private fun isWakeWord(t: String): Boolean {
+        val lower = t.lowercase()
+        return lower.contains("hey kate") ||
+               lower.contains("hi kate") ||
+               lower.contains("okay kate") ||
+               lower.contains("ok kate") ||
+               lower.contains("hey cat") ||
+               lower.startsWith("kate ")
+    }
 
     fun setSpeaking(state: Boolean) {
         isSpeaking.set(state)
-        // Reset recognizer buffer when Kate stops speaking
-        // Prevents Kate hearing her own TTS as commands
-        if (!state) recognizer?.reset()
-        Log.d(TAG, "Speaking: $state")
+        // Flush VOSK buffer when Kate stops talking so it doesn't process
+        // any audio residue from TTS playback as a command
+        if (!state) {
+            recognizer?.reset()
+            Log.d(TAG, "Mic resumed — VOSK buffer flushed")
+        } else {
+            Log.d(TAG, "Mic paused — Kate speaking")
+        }
     }
 
     fun isListening(): Boolean = isRunning.get()
@@ -187,15 +196,17 @@ class KateSpeechManager(
         isRunning.set(false)
         try { audioRecord?.stop(); audioRecord?.release() } catch (_: Exception) {}
         audioRecord = null
-        listenThread?.interrupt(); listenThread = null
-        Log.d(TAG, "Stopped")
+        listenThread?.interrupt()
+        listenThread = null
+        Log.d(TAG, "Listening stopped")
     }
 
     fun shutdown() {
         stopListening()
         try { recognizer?.close() } catch (_: Exception) {}
         try { model?.close() }      catch (_: Exception) {}
-        recognizer = null; model = null
+        recognizer = null
+        model = null
         isModelReady.set(false)
     }
 
