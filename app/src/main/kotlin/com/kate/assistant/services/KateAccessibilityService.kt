@@ -1,7 +1,6 @@
 package com.kate.assistant.services
 
 import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.AccessibilityServiceInfo
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -13,92 +12,94 @@ class KateAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "KateAccessibility"
-        var instance: KateAccessibilityService? = null
+
+        // Volatile so the service instance is visible across threads safely
+        @Volatile var instance: KateAccessibilityService? = null
     }
 
     override fun onServiceConnected() {
+        // ── FIX: DO NOT override serviceInfo here ──────────────────
+        // Android already loaded all capabilities from accessibility_config.xml.
+        // Overwriting serviceInfo in code (especially with a new blank object)
+        // causes Android to report "This service is malfunctioning" on many OEMs.
+        // The XML config already declares all needed flags, event types, and
+        // canRetrieveWindowContent. Trust the XML. ──────────────────
         instance = this
-        val info = serviceInfo ?: AccessibilityServiceInfo()
-        info.apply {
-            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                         AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
-                         AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED or
-                         AccessibilityEvent.TYPE_VIEW_FOCUSED
-            feedbackType        = AccessibilityServiceInfo.FEEDBACK_GENERIC
-            notificationTimeout = 100
-            flags               = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
-                                  AccessibilityServiceInfo.FLAG_REQUEST_ENHANCED_WEB_ACCESSIBILITY or
-                                  AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-        }
-        serviceInfo = info
         Log.d(TAG, "✅ Accessibility service connected")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
-                val pkg = event.packageName?.toString() ?: return
-                if (pkg != packageName) {
-                    KateEventBus.emit(KateEvent.AppOpened(pkg))
+        try {
+            when (event.eventType) {
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                    val pkg = event.packageName?.toString() ?: return
+                    if (pkg != packageName) {
+                        KateEventBus.emit(KateEvent.AppOpened(pkg))
+                    }
                 }
-            }
-            AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
-                val text = event.text.joinToString(" ").trim()
-                if (text.isNotBlank()) {
-                    Log.d(TAG, "Notification: $text")
+                AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
+                    val text = event.text.joinToString(" ").trim()
+                    if (text.isNotBlank()) Log.d(TAG, "Notification: $text")
                 }
+                else -> Unit
             }
-            else -> Unit
+        } catch (e: Exception) {
+            // Never crash inside onAccessibilityEvent — it can kill the whole service
+            Log.e(TAG, "Event error: ${e.message}")
         }
     }
 
-    // ── Ghost typing ─────────────────────────────────────────
+    // ── Ghost typing ──────────────────────────────────────────
     fun ghostType(text: String): Boolean {
-        val root = rootInActiveWindow ?: run {
-            Log.e(TAG, "No active window"); return false
+        return try {
+            val root = rootInActiveWindow ?: run {
+                Log.e(TAG, "No active window for ghostType"); return false
+            }
+
+            var target = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                ?: findEditableNode(root)
+
+            if (target == null) {
+                Log.e(TAG, "No editable field found"); return false
+            }
+
+            target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            Thread.sleep(150)
+
+            val args = Bundle().apply {
+                putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            }
+            val result = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+
+            if (result) {
+                Thread.sleep(200)
+                val sendBtn = findNodeByText(root, listOf("send", "Send", "submit", "Submit"))
+                sendBtn?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            }
+
+            Log.d(TAG, "Ghost type result: $result")
+            result
+        } catch (e: Exception) {
+            Log.e(TAG, "ghostType error: ${e.message}")
+            false
         }
-
-        // Try focused input first
-        var target = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-
-        // Fallback — find any editable field
-        if (target == null) target = findEditableNode(root)
-
-        if (target == null) {
-            Log.e(TAG, "No editable field"); return false
-        }
-
-        target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        Thread.sleep(150)
-
-        val args = Bundle().apply {
-            putCharSequence(
-                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text
-            )
-        }
-        val result = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-
-        if (result) {
-            Thread.sleep(200)
-            val sendBtn = findNodeByDescription(root, "send")
-                ?: findNodeByDescription(root, "Send")
-                ?: findNodeByDescription(root, "submit")
-            sendBtn?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        }
-
-        Log.d(TAG, "Ghost type: $result")
-        return result
     }
 
-    // ── Read screen ───────────────────────────────────────────
-    fun readScreen(): String = extractText(rootInActiveWindow).trim()
+    // ── Screen reader ─────────────────────────────────────────
+    fun readScreen(): String = try {
+        extractText(rootInActiveWindow).trim()
+    } catch (e: Exception) {
+        Log.e(TAG, "readScreen error: ${e.message}"); ""
+    }
 
     // ── Navigation ────────────────────────────────────────────
-    fun goBack(): Boolean        = performGlobalAction(GLOBAL_ACTION_BACK)
-    fun goHome(): Boolean        = performGlobalAction(GLOBAL_ACTION_HOME)
-    fun openRecents(): Boolean   = performGlobalAction(GLOBAL_ACTION_RECENTS)
-    fun takeScreenshot(): Boolean = performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
+    fun goBack(): Boolean           = performGlobalAction(GLOBAL_ACTION_BACK)
+    fun goHome(): Boolean           = performGlobalAction(GLOBAL_ACTION_HOME)
+    fun openRecents(): Boolean      = performGlobalAction(GLOBAL_ACTION_RECENTS)
+    fun takeScreenshot(): Boolean   = performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
     fun showNotifications(): Boolean = performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+    fun openQuickSettings(): Boolean = performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
 
     // ── Helpers ───────────────────────────────────────────────
     private fun extractText(node: AccessibilityNodeInfo?): String {
@@ -119,24 +120,27 @@ class KateAccessibilityService : AccessibilityService() {
         return null
     }
 
-    private fun findNodeByDescription(
-        node: AccessibilityNodeInfo?, desc: String
+    private fun findNodeByText(
+        node: AccessibilityNodeInfo?,
+        targets: List<String>
     ): AccessibilityNodeInfo? {
         node ?: return null
-        if (node.contentDescription?.contains(desc, true) == true ||
-            node.text?.contains(desc, true) == true) return node
+        val cd   = node.contentDescription?.toString() ?: ""
+        val text = node.text?.toString() ?: ""
+        if (targets.any { cd.contains(it, true) || text.contains(it, true) }) return node
         for (i in 0 until node.childCount) {
-            findNodeByDescription(node.getChild(i), desc)?.let { return it }
+            findNodeByText(node.getChild(i), targets)?.let { return it }
         }
         return null
     }
 
     override fun onInterrupt() {
-        Log.d(TAG, "Interrupted")
+        Log.d(TAG, "Service interrupted")
     }
 
     override fun onDestroy() {
         instance = null
+        Log.d(TAG, "Service destroyed")
         super.onDestroy()
     }
 }
