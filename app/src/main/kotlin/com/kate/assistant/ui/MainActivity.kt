@@ -19,82 +19,63 @@ import com.kate.assistant.ui.theme.KateTheme
 
 class MainActivity : ComponentActivity() {
 
-    private val permissionLauncher = registerForActivityResult(
+    private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        startKateService()
-        checkAccessibility()
-    }
+    ) { launchKate() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent { KateTheme { HomeScreen() } }
+        checkAndRequestPermissions()
+    }
 
-        val needed = mutableListOf<String>()
-        val perms  = mutableListOf(
+    private fun checkAndRequestPermissions() {
+        val needed = mutableListOf(
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.CALL_PHONE,
             Manifest.permission.READ_CONTACTS,
             Manifest.permission.SEND_SMS,
             Manifest.permission.READ_SMS,
             Manifest.permission.CAMERA
-        )
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        ).also { list ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                list.add(Manifest.permission.POST_NOTIFICATIONS)
+        }.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
 
-        perms.forEach { perm ->
-            if (ContextCompat.checkSelfPermission(this, perm)
-                != PackageManager.PERMISSION_GRANTED
-            ) needed.add(perm)
-        }
-
-        if (needed.isNotEmpty()) {
-            permissionLauncher.launch(needed.toTypedArray())
-        } else {
-            startKateService()
-            checkAccessibility()
-        }
+        if (needed.isEmpty()) launchKate()
+        else permLauncher.launch(needed.toTypedArray())
     }
 
-    private fun startKateService() {
+    private fun launchKate() {
         val intent = Intent(this, KateService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
+        else startService(intent)
+
+        // Check accessibility 6s after launch — after Kate greets user
+        Handler(Looper.getMainLooper()).postDelayed({ checkAccessibility() }, 6000)
     }
 
     private fun checkAccessibility() {
-        Handler(Looper.getMainLooper()).postDelayed({
-            if (!isAccessibilityEnabled()) {
-                startActivity(
-                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
-            }
-        }, 4000)
+        if (!isAccessibilityEnabled()) {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
     }
 
     private fun isAccessibilityEnabled(): Boolean {
-        val service = "${packageName}/com.kate.assistant.services.KateAccessibilityService"
+        val target = "$packageName/com.kate.assistant.services.KateAccessibilityService"
         return try {
             val enabled = Settings.Secure.getString(
-                contentResolver,
-                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-            ) ?: return false
-
+                contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
             val splitter = TextUtils.SimpleStringSplitter(':')
             splitter.setString(enabled)
             while (splitter.hasNext()) {
-                val name = splitter.next()
-                if (name.equals(service, ignoreCase = true)) return true
+                if (splitter.next().equals(target, ignoreCase = true)) return true
             }
             false
-        } catch (e: Exception) {
-            false
-        }
+        } catch (_: Exception) { false }
     }
 }
