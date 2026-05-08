@@ -10,7 +10,8 @@ import android.provider.Settings
 import android.telephony.SmsManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.kate.assistant.core.ModelManager
+import com.kate.assistant.features.voice.ModelManager
+import com.kate.assistant.bridge.KateBridge
 import com.kate.assistant.bridge.KateEvent
 import com.kate.assistant.bridge.KateEventBus
 import com.kate.assistant.data.db.HabitDao
