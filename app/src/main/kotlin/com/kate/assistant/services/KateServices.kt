@@ -121,7 +121,21 @@ class KateService : Service() {
         speech = KateSpeechManager(
             context  = this,
             onResult = { text -> handler.post { handleSpeech(text) } },
-            onError  = { err  -> Log.e(TAG, "Speech error: $err") }
+            onError  = { err ->
+                when (err) {
+                    "AUDIO_DEAD" -> {
+                        // AudioRecord died (call ended, OEM killed mic, audio focus lost).
+                        // Stop the dead instance and restart after a short delay.
+                        Log.w(TAG, "Audio dead — restarting mic in 1.5s")
+                        handler.postDelayed({
+                            speech.stopListening()
+                            speech.startListening()
+                            updateNotification("Always listening \uD83C\uDFA4")
+                        }, 1500)
+                    }
+                    else -> Log.e(TAG, "Speech error: $err")
+                }
+            }
         )
 
         bridge.updateAppList(loadInstalledApps())
