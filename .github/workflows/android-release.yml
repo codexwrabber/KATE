@@ -33,16 +33,21 @@ jobs:
       - name: Clean build
         run: ./gradlew clean
 
-      - name: Download VOSK model
+      - name: Download VOSK small model (offline bootstrap)
         run: |
           mkdir -p app/src/main/assets/model
-          curl -L "https://alphacephei.com/vosk/models/vosk-model-en-us-0.22-lgraph.zip" \
+          curl -L "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip" \
             -o vosk-model.zip
           unzip vosk-model.zip -d vosk-tmp
-          cp -r vosk-tmp/vosk-model-en-us-0.22-lgraph/. app/src/main/assets/model/
+          cp -r vosk-tmp/vosk-model-small-en-us-0.15/. app/src/main/assets/model/
           rm -rf vosk-tmp vosk-model.zip
+          echo "Small model size: $(du -sh app/src/main/assets/model/ | cut -f1)"
           echo "Model files:"
           ls app/src/main/assets/model/
+          # Note: the daanzu-lgraph upgrade model (129MB, WER 8.2%) is downloaded
+          # at runtime by ModelManager on first launch — NOT bundled in the APK.
+          # This keeps the APK lean while still giving full offline capability
+          # from first install via the small model fallback.
 
       - name: Build & sign release APK
         env:
