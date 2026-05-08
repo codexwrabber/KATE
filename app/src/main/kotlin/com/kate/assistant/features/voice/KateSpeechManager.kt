@@ -37,10 +37,12 @@ class KateSpeechManager(
     private val ECHO_COOLDOWN_MS = 800L
     @Volatile private var ignoredUntil = 0L
 
-    // ── No energy gate ────────────────────────────────────────
-    // VOSK has built-in VAD — an external energy gate causes latency
-    // by dropping the attack phase (first 100-200 ms) of each utterance.
-    // REMOVED: was causing the speech delay bug.
+    // ── Soft noise floor gate ─────────────────────────────────
+    // NOT the old hard gate (500 RMS) that cut speech onset and caused delay.
+    // This low floor (150 RMS) only blocks pure silence and fan/room hum.
+    // Real speech onset easily clears 150. Without it, VOSK accumulates
+    // garbage context from constant background noise → random hallucinations.
+    private val NOISE_FLOOR = 150.0
 
     init {
         Thread {
@@ -87,6 +89,15 @@ class KateSpeechManager(
         }
     }
 
+    private fun rms(buf: ByteArray, len: Int): Double {
+        var sum = 0.0; var i = 0
+        while (i < len - 1) {
+            val s = ((buf[i + 1].toInt() shl 8) or (buf[i].toInt() and 0xFF)).toShort()
+            sum += s * s.toDouble(); i += 2
+        }
+        return kotlin.math.sqrt(sum / (len / 2))
+    }
+
     fun startListening() {
         if (isRunning.get()) return
         if (!isModelReady.get()) {
@@ -130,6 +141,10 @@ class KateSpeechManager(
             val buf = ByteArray(minBuf)
             Log.d(TAG, "🎤 Listening...")
 
+            // Counts consecutive read failures — if AudioRecord dies silently,
+            // this triggers a restart instead of looping forever as a zombie.
+            var failStreak = 0
+
             while (isRunning.get()) {
                 try {
                     if (ar.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
@@ -137,11 +152,26 @@ class KateSpeechManager(
                     }
 
                     val read = ar.read(buf, 0, buf.size)
-                    if (read <= 0) { Thread.sleep(10); continue }
 
-                    // Pause input processing while Kate is speaking (mic stays open
-                    // to avoid AudioRecord underflows, we just don't feed VOSK)
+                    if (read <= 0) {
+                        failStreak++
+                        // 60 failures × 10ms = 600ms of dead audio → trigger restart
+                        if (failStreak > 60) {
+                            Log.e(TAG, "AudioRecord dead (failStreak=$failStreak) — signalling restart")
+                            isRunning.set(false)
+                            handler.post { onError?.invoke("AUDIO_DEAD") }
+                            break
+                        }
+                        Thread.sleep(10); continue
+                    }
+                    failStreak = 0  // reset on any successful read
+
+                    // Pause input while Kate is speaking
                     if (isSpeaking.get()) continue
+
+                    // Soft noise floor — skip frames that are pure silence/hum
+                    // (RMS < 150). Speech onset clears this easily.
+                    if (rms(buf, read) < NOISE_FLOOR) continue
 
                     val isFinal = recognizer?.acceptWaveForm(buf, read) ?: false
 
