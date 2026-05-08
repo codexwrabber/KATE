@@ -54,8 +54,30 @@ class MainActivity : ComponentActivity() {
             startForegroundService(intent)
         else startService(intent)
 
+        // Ask user to disable battery optimization — #1 cause of mic dying
+        // on OEM phones (Tecno, Infinix, Samsung, Xiaomi, etc.)
+        requestBatteryOptimizationExemption()
+
         // Check accessibility 6s after launch — after Kate greets user
         Handler(Looper.getMainLooper()).postDelayed({ checkAccessibility() }, 6000)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = getSystemService(android.os.PowerManager::class.java)
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    startActivity(
+                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                            data = android.net.Uri.parse("package:$packageName")
+                        }
+                    )
+                } catch (_: Exception) {
+                    // Some OEMs block this intent — silently ignore
+                }
+            }
+        }
     }
 
     private fun checkAccessibility() {
