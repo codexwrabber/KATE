@@ -31,6 +31,12 @@ class KateSpeechManager(
     private val isSpeaking   = AtomicBoolean(false)
     private val isModelReady = AtomicBoolean(false)
 
+    // After Kate stops speaking, ignore VOSK results for this many ms.
+    // TTS echo + room reverb lingers in the mic buffer even after onSpeechIdle.
+    // Without this, VOSK processes the tail of Kate's own voice as a command.
+    private val ECHO_COOLDOWN_MS = 800L
+    @Volatile private var ignoredUntil = 0L
+
     // ── No energy gate ────────────────────────────────────────
     // VOSK has built-in VAD — an external energy gate causes latency
     // by dropping the attack phase (first 100-200 ms) of each utterance.
@@ -142,18 +148,21 @@ class KateSpeechManager(
                     if (isFinal) {
                         val text = JSONObject(recognizer?.result ?: "{}")
                             .optString("text", "").trim()
+                        // Suppress results during echo cooldown window
+                        if (System.currentTimeMillis() < ignoredUntil) continue
                         if (text.length > 2 && text != "[unk]" && text.isNotBlank()) {
                             Log.d(TAG, "✅ Final: $text")
                             handler.post { onResult(text) }
                         }
                     } else {
-                        // Check partial for wake word — gives ~300ms faster wake response
                         val partial = JSONObject(recognizer?.partialResult ?: "{}")
                             .optString("partial", "").trim()
+                        // Also suppress wake word detection during cooldown
+                        if (System.currentTimeMillis() < ignoredUntil) continue
                         if (partial.isNotBlank() && isWakeWord(partial)) {
                             Log.d(TAG, "🔔 Wake partial: $partial")
                             handler.post { onResult("WAKE") }
-                            recognizer?.reset()  // Flush after wake so full command starts fresh
+                            recognizer?.reset()
                         }
                     }
                 } catch (e: InterruptedException) {
@@ -179,11 +188,12 @@ class KateSpeechManager(
 
     fun setSpeaking(state: Boolean) {
         isSpeaking.set(state)
-        // Flush VOSK buffer when Kate stops talking so it doesn't process
-        // any audio residue from TTS playback as a command
         if (!state) {
+            // Set the cooldown window — ignore all VOSK results for 800ms
+            // to let room echo die completely before we process speech again
+            ignoredUntil = System.currentTimeMillis() + ECHO_COOLDOWN_MS
             recognizer?.reset()
-            Log.d(TAG, "Mic resumed — VOSK buffer flushed")
+            Log.d(TAG, "Mic resumed — echo cooldown active for ${ECHO_COOLDOWN_MS}ms")
         } else {
             Log.d(TAG, "Mic paused — Kate speaking")
         }
