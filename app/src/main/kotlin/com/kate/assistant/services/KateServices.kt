@@ -685,10 +685,19 @@ class KateService : Service() {
         }
     }
 
-    // ── FIX: actually update the notification after init ─────
+    // ── Update notification — must call startForeground again ─
+    // notify() alone does NOT reliably update foreground service
+    // notifications on many OEM Android builds (Tecno, Infinix, etc.)
     private fun updateNotification(text: String) {
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIF_ID, buildNotification(text))
+        val notif = buildNotification(text)
+        // Update via notify first (fast path)
+        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, notif)
+        // Then re-call startForeground with same ID — guaranteed to update on all OEMs
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        } else {
+            startForeground(NOTIF_ID, notif)
+        }
     }
 
     private fun buildNotification(text: String): Notification {
