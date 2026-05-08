@@ -10,7 +10,7 @@ import android.provider.Settings
 import android.telephony.SmsManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.kate.assistant.bridge.KateBridge
+import com.kate.assistant.core.ModelManager
 import com.kate.assistant.bridge.KateEvent
 import com.kate.assistant.bridge.KateEventBus
 import com.kate.assistant.data.db.HabitDao
@@ -36,6 +36,7 @@ class KateService : Service() {
 
     // ── Components ────────────────────────────────────────────
     private lateinit var bridge: KateBridge
+    private lateinit var modelManager: ModelManager
     private lateinit var speech: KateSpeechManager
     private lateinit var tts: KateTts
     private lateinit var device: KateDeviceController
@@ -92,23 +93,22 @@ class KateService : Service() {
     }
 
     private fun initAllComponents() {
-        tts         = KateTts(this)
-        bridge      = KateBridge(this)
-        device      = KateDeviceController(this)
-        hardware    = KateHardwareController(this)
-        launcher    = KateAppLauncher(this)
-        reminder    = ReminderScheduler(this)
-        journal     = PhantomJournal(this)
-        proactive   = ProactiveEngine(this)
-        classifier  = IntentClassifier(this)
-        vectorizer  = TextVectorizer()
-        labelMapper = LabelMapper(this)
-        db          = KateDatabase.getDatabase(this)
-        habits      = db.habitDao()
+        tts          = KateTts(this)
+        modelManager = ModelManager(this)
+        bridge       = KateBridge(this)
+        device       = KateDeviceController(this)
+        hardware     = KateHardwareController(this)
+        launcher     = KateAppLauncher(this)
+        reminder     = ReminderScheduler(this)
+        journal      = PhantomJournal(this)
+        proactive    = ProactiveEngine(this)
+        classifier   = IntentClassifier(this)
+        vectorizer   = TextVectorizer()
+        labelMapper  = LabelMapper(this)
+        db           = KateDatabase.getDatabase(this)
+        habits       = db.habitDao()
 
-        // ── Wire TTS callbacks to speech manager ───────────────
-        // This is the fix for Kate hearing her own voice as commands.
-        // Instead of a guessed timer, we use the REAL utterance lifecycle.
+        // ── Wire TTS callbacks ─────────────────────────────────
         tts.onSpeechActive = {
             speech.setSpeaking(true)
             Log.d(TAG, "TTS started — mic paused")
@@ -118,14 +118,17 @@ class KateService : Service() {
             Log.d(TAG, "TTS finished — mic resumed")
         }
 
+        // ── Model path injection ───────────────────────────────
+        // ModelManager returns the best available path:
+        //  - First launch  → small model (already present)
+        //  - After upgrade → daanzu-lgraph (129MB, WER 8.2% vs 11.5%)
         speech = KateSpeechManager(
-            context  = this,
-            onResult = { text -> handler.post { handleSpeech(text) } },
-            onError  = { err ->
+            context   = this,
+            modelPath = modelManager.bestModelPath(),
+            onResult  = { text -> handler.post { handleSpeech(text) } },
+            onError   = { err ->
                 when (err) {
                     "AUDIO_DEAD" -> {
-                        // AudioRecord died (call ended, OEM killed mic, audio focus lost).
-                        // Stop the dead instance and restart after a short delay.
                         Log.w(TAG, "Audio dead — restarting mic in 1.5s")
                         handler.postDelayed({
                             speech.stopListening()
@@ -137,6 +140,15 @@ class KateService : Service() {
                 }
             }
         )
+
+        // ── Model upgrade callback ─────────────────────────────
+        // Fires on main thread when daanzu model finishes downloading.
+        // Seamlessly switches VOSK to better model without restart.
+        modelManager.onUpgradeReady = {
+            Log.d(TAG, "Upgraded model ready — switching VOSK")
+            speech.switchModel(modelManager.upgradeModelDir.absolutePath)
+            speak("Speech upgrade complete. I can now hear you much better.")
+        }
 
         bridge.updateAppList(loadInstalledApps())
         val formatted = runBlocking {
@@ -152,13 +164,23 @@ class KateService : Service() {
         bridge.startAudio()
         speech.startListening()
 
-        // ── FIX: update notification to "Always listening" ────
+        // ── Update notification ────────────────────────────────
         updateNotification("Always listening \uD83C\uDFA4")
+
+        // ── Build dynamic grammar ──────────────────────────────
+        // Restricts VOSK to Kate's command vocabulary.
+        // Background noise/speech → "[unk]" → discarded.
+        // Dramatically cuts false commands in noisy environments.
+        handler.post { buildAndPushGrammar() }
+
+        // ── Start model upgrade (silent background download) ───
+        // Downloads daanzu-lgraph (129MB) once, then switches VOSK automatically.
+        // Shows a progress notification; user can ignore it.
+        modelManager.startUpgradeIfNeeded()
 
         // Greet after TTS is ready
         handler.postDelayed({ greetUser() }, 1200)
 
-        // Watchdog — 30s interval for faster recovery (was 60s)
         startWatchdog()
     }
 
@@ -169,6 +191,7 @@ class KateService : Service() {
         if (::speech.isInitialized) speech.shutdown()
         if (::bridge.isInitialized)  bridge.stopAudio()
         if (::classifier.isInitialized) classifier.close()
+        if (::modelManager.isInitialized) modelManager.cancel()
         scope.cancel()
         super.onDestroy()
     }
@@ -665,6 +688,134 @@ class KateService : Service() {
                 else               -> Unit
             }
         }
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // GRAMMAR BUILDER
+    // ══════════════════════════════════════════════════════════
+
+    /**
+     * Builds Kate's full command vocabulary and pushes it to VOSK.
+     * Called once at startup (on main thread, fast enough).
+     * Re-call any time apps are installed/uninstalled or contacts change.
+     *
+     * How it works: VOSK only tries to match phrases in this list.
+     * Anything else → "[unk]" → KateSpeechManager drops it silently.
+     * This is what eliminates random words from background noise.
+     */
+    private fun buildAndPushGrammar() {
+        scope.launch(Dispatchers.IO) {
+            val phrases = mutableListOf(
+                // Wake words
+                "hey kate", "hi kate", "okay kate", "ok kate",
+
+                // Identity
+                "who are you", "what are you", "what can you do",
+                "how are you", "who made you", "who created you",
+
+                // Greetings
+                "hello", "good morning", "good afternoon", "good evening", "good night",
+
+                // Time & date
+                "what time is it", "what is the time", "time",
+                "what day is it", "what is today", "what is the date",
+                "what is today's date", "today's date",
+
+                // Battery
+                "battery level", "battery percentage", "how much battery",
+                "check battery", "power level", "how much charge",
+
+                // Volume
+                "volume up", "increase volume", "turn up", "louder",
+                "volume down", "decrease volume", "turn down", "quieter", "lower volume",
+                "mute", "unmute", "silent mode", "max volume", "full volume", "turn on sound",
+
+                // Flashlight
+                "torch on", "flashlight on", "turn on torch", "turn on flashlight",
+                "turn on the torch", "light on",
+                "torch off", "flashlight off", "turn off torch", "turn off flashlight", "light off",
+
+                // Navigation
+                "go back", "back", "go home", "home", "home screen",
+                "recent apps", "show recents", "open recents",
+                "take screenshot", "screenshot",
+                "show notifications", "open notifications", "pull down notifications",
+                "quick settings", "open quick settings",
+                "read screen", "what is on screen", "what's on screen",
+
+                // System
+                "open settings", "settings", "open wifi", "wifi settings",
+                "bluetooth settings", "open bluetooth",
+                "do not disturb on", "do not disturb off", "enable dnd", "disable dnd",
+
+                // Search
+                "search for [unk]", "google [unk]", "look up [unk]", "search [unk]",
+                "youtube [unk]", "navigate to [unk]", "directions to [unk]",
+
+                // Calls
+                "call [unk]", "dial [unk]",
+
+                // Messages
+                "send message to [unk]", "text [unk]", "message [unk]",
+
+                // Reminders
+                "remind me to [unk]", "set reminder", "set alarm",
+                "set timer", "timer for [unk]",
+
+                // Apps (generic)
+                "open [unk]", "launch [unk]", "start [unk]",
+                "play music", "play songs", "music",
+                "open browser", "open chrome", "open internet",
+
+                // Stop
+                "stop listening", "goodbye kate", "bye kate", "sleep kate",
+                "say that again", "repeat that", "what did you say",
+
+                // Typing
+                "type [unk]", "write [unk]"
+            )
+
+            // Add every installed app name as "open <name>"
+            getInstalledAppNames().forEach { name ->
+                phrases.add("open $name")
+                phrases.add("launch $name")
+            }
+
+            // Add every contact name as "call <name>" and "text <name>"
+            getContactNames().forEach { name ->
+                phrases.add("call $name")
+                phrases.add("text $name")
+                phrases.add("message $name")
+            }
+
+            Log.d(TAG, "Grammar: ${phrases.size} phrases built")
+            withContext(Dispatchers.Main) {
+                speech.updateGrammar(phrases)
+            }
+        }
+    }
+
+    private fun getInstalledAppNames(): List<String> =
+        packageManager.getInstalledApplications(0)
+            .map { packageManager.getApplicationLabel(it).toString().lowercase().trim() }
+            .filter { it.isNotBlank() && it.length > 1 }
+            .distinct()
+
+    private fun getContactNames(): List<String> = try {
+        val names = mutableListOf<String>()
+        contentResolver.query(
+            android.provider.ContactsContract.Contacts.CONTENT_URI,
+            arrayOf(android.provider.ContactsContract.Contacts.DISPLAY_NAME),
+            null, null, null
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val name = c.getString(0)?.lowercase()?.trim()
+                if (!name.isNullOrBlank()) names.add(name)
+            }
+        }
+        names
+    } catch (e: Exception) {
+        Log.e(TAG, "Contacts read: ${e.message}"); emptyList()
     }
 
     // ══════════════════════════════════════════════════════════
