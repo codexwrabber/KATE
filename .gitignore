@@ -1,3 +1,4 @@
 kate.jks
 SIGNING_KEY.txt
 *.b64
+local.properties
