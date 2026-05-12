@@ -1,6 +1,8 @@
 package com.kate.assistant.features.device
 
 import android.Manifest
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioManager
@@ -9,11 +11,14 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.provider.Settings
 import androidx.core.content.ContextCompat
+import com.kate.assistant.core.KateDeviceAdmin
 
 class KateHardwareController(private val context: Context) {
 
     private val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val devicePolicyManager = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+    private val adminComponent = ComponentName(context, KateDeviceAdmin::class.java)
 
     fun kateHaptic() {
         val hasPermission = ContextCompat.checkSelfPermission(
@@ -50,7 +55,6 @@ class KateHardwareController(private val context: Context) {
                     true
                 } else false
             } else {
-                // For older Android versions, torch control is not reliably available
                 false
             }
         } catch (e: Exception) {
@@ -182,7 +186,6 @@ class KateHardwareController(private val context: Context) {
                 false
             }
         } else {
-            // For older Android versions, DND not available
             false
         }
     }
@@ -198,4 +201,71 @@ class KateHardwareController(private val context: Context) {
             }
         } else false
     }
+
+    // ─────────────────────────────
+    // LOCK SCREEN
+    // Requires Device Admin to be active
+    // ─────────────────────────────
+    fun lockScreen(): Boolean {
+        return try {
+            if (devicePolicyManager.isAdminActive(adminComponent)) {
+                devicePolicyManager.lockNow()
+                true
+            } else {
+                false
+            }
+        } catch (e: Exception) { 
+            false 
+        }
+    }
+
+    fun isDeviceAdminActive(): Boolean {
+        return try {
+            devicePolicyManager.isAdminActive(adminComponent)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    // ─────────────────────────────
+    // WIFI TOGGLE
+    // API 28 and below: direct WifiManager toggle
+    // API 29+: open system WiFi quick panel (can't toggle directly — Android restriction)
+    // ─────────────────────────────
+    fun setWifi(enable: Boolean): WifiResult {
+        return try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                @Suppress("DEPRECATION")
+                val wm = context.applicationContext
+                    .getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+                wm.isWifiEnabled = enable
+                WifiResult.TOGGLED
+            } else {
+                WifiResult.NEEDS_PANEL
+            }
+        } catch (e: Exception) { WifiResult.FAILED }
+    }
+
+    enum class WifiResult { TOGGLED, NEEDS_PANEL, FAILED }
+
+    // ─────────────────────────────
+    // BLUETOOTH TOGGLE
+    // API 32 and below: direct BluetoothAdapter toggle (deprecated in 33 but still works)
+    // API 33+: opens system settings — no direct toggle allowed for third-party apps
+    // ─────────────────────────────
+    @Suppress("DEPRECATION", "MissingPermission")
+    fun setBluetooth(enable: Boolean): BluetoothResult {
+        return try {
+            val adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
+                ?: return BluetoothResult.FAILED
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
+                if (enable) adapter.enable() else adapter.disable()
+                BluetoothResult.TOGGLED
+            } else {
+                BluetoothResult.NEEDS_SETTINGS
+            }
+        } catch (e: Exception) { BluetoothResult.FAILED }
+    }
+
+    enum class BluetoothResult { TOGGLED, NEEDS_SETTINGS, FAILED }
 }
