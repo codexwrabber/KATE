@@ -1,16 +1,21 @@
 package com.kate.assistant.services
 
 import android.app.*
-import android.content.Intent
+import android.app.admin.DevicePolicyManager
+import android.bluetooth.BluetoothAdapter
+import android.content.*
+import android.content.ComponentName
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.*
 import android.provider.ContactsContract
 import android.provider.Settings
 import android.telephony.SmsManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.kate.assistant.features.voice.ModelManager
+import com.kate.assistant.core.KateDeviceAdmin
 import com.kate.assistant.bridge.KateBridge
 import com.kate.assistant.bridge.KateEvent
 import com.kate.assistant.bridge.KateEventBus
@@ -30,44 +35,81 @@ import com.kate.assistant.features.tasks.ReminderScheduler
 import com.kate.assistant.features.voice.KateSpeechManager
 import com.kate.assistant.features.voice.KateTts
 import kotlinx.coroutines.*
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
 class KateService : Service() {
 
-    // ── Components ────────────────────────────────────────────
-    private lateinit var bridge: KateBridge
-    private lateinit var modelManager: ModelManager
-    private lateinit var speech: KateSpeechManager
-    private lateinit var tts: KateTts
-    private lateinit var device: KateDeviceController
-    private lateinit var hardware: KateHardwareController
-    private lateinit var launcher: KateAppLauncher
-    private lateinit var reminder: ReminderScheduler
-    private lateinit var db: KateDatabase
-    private lateinit var habits: HabitDao
-    private lateinit var journal: PhantomJournal
-    private lateinit var proactive: ProactiveEngine
-    private lateinit var classifier: IntentClassifier
-    private lateinit var vectorizer: TextVectorizer
+    private lateinit var bridge:      KateBridge
+    private lateinit var speech:      KateSpeechManager
+    private lateinit var tts:         KateTts
+    private lateinit var device:      KateDeviceController
+    private lateinit var hardware:    KateHardwareController
+    private lateinit var launcher:    KateAppLauncher
+    private lateinit var reminder:    ReminderScheduler
+    private lateinit var db:          KateDatabase
+    private lateinit var habits:      HabitDao
+    private lateinit var journal:     PhantomJournal
+    private lateinit var proactive:   ProactiveEngine
+    private lateinit var classifier:  IntentClassifier
+    private lateinit var vectorizer:  TextVectorizer
     private lateinit var labelMapper: LabelMapper
 
     private val scope   = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val handler = Handler(Looper.getMainLooper())
     private var initDone = false
 
-    // ── Conversation context ──────────────────────────────────
-    // When Kate asks a follow-up question (e.g., "Which app?"), the next
-    // speech result is routed here instead of to the main command handler.
-    private var pendingContext: String? = null      // "CALL", "APP", "MESSAGE_TO", etc.
-    private var pendingData:    String? = null      // partial data from first turn
+    // Tracks whether a mic restart is already in flight so the watchdog
+    // doesn't stack a second startListening() on top.
+    private var micRestartPending = false
+
+    private val dpm by lazy {
+        getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+    }
+    private val adminComponent by lazy {
+        ComponentName(this, KateDeviceAdmin::class.java)
+    }
+
+    // ── Charging receiver ─────────────────────────────────────
+    private val chargingReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (!initDone) return
+            when (intent.action) {
+                Intent.ACTION_POWER_CONNECTED    -> speak("Charger connected. Your phone is now charging.")
+                Intent.ACTION_POWER_DISCONNECTED -> speak("Charger disconnected.")
+            }
+        }
+    }
+    private var chargingRegistered = false
+
+    private var pendingContext: String? = null
+    private var pendingData:    String? = null
 
     companion object {
         private const val TAG        = "KateService"
         private const val CHANNEL_ID = "kate_channel"
         private const val NOTIF_ID   = 1
-        private const val USER_NAME  = "Dewrabber"
+        // USER_NAME is now loaded dynamically from KatePreferences on init.
+        // Default fallback only if prefs haven't been written yet (should never happen
+        // after the onboarding screen runs, but guards against edge cases).
+        private const val DEFAULT_NAME = "there"
     }
+
+    // Loaded from prefs in initAllComponents()
+    private var userName: String = DEFAULT_NAME
+
+    // ── Online pipeline ────────────────────────────────────────
+    private lateinit var deepgram:      com.kate.assistant.features.voice.DeepgramSTT
+    private lateinit var claudeAI:      com.kate.assistant.features.ai.ClaudeAI
+    private lateinit var networkMonitor: com.kate.assistant.core.network.KateNetworkMonitor
+    private lateinit var usageManager:  com.kate.assistant.features.subscription.KateUsageManager
+    private lateinit var prefs:         com.kate.assistant.data.preferences.KatePreferences
+
+    // Conversation history for multi-turn Claude context (last 10 turns kept)
+    private val conversationHistory = ArrayDeque<Pair<String, String>>()
+
+    @Volatile private var onlineMode = false
 
     // ══════════════════════════════════════════════════════════
     // LIFECYCLE
@@ -75,11 +117,7 @@ class KateService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-
-        // PHASE 1 — startForeground IMMEDIATELY (< 5s rule)
         startForegroundNow()
-
-        // PHASE 2 — heavy init on background thread
         Thread {
             try {
                 initAllComponents()
@@ -87,15 +125,62 @@ class KateService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "Init failed: ${e.message}")
                 handler.post {
-                    if (::tts.isInitialized) tts.speak("Kate encountered a startup error. Please restart me.")
+                    if (::tts.isInitialized)
+                        tts.speak("Kate encountered a startup error. Please restart me.")
                 }
             }
         }.also { it.name = "kate-init"; it.start() }
     }
 
     private fun initAllComponents() {
+        // ── Load user name from prefs ──────────────────────────
+        prefs    = com.kate.assistant.data.preferences.KatePreferences(this)
+        userName = kotlinx.coroutines.runBlocking { prefs.getUserNameOnce() }
+            .ifBlank { DEFAULT_NAME }
+
+        // ── Online pipeline ────────────────────────────────────
+        usageManager   = com.kate.assistant.features.subscription.KateUsageManager(prefs)
+        claudeAI       = com.kate.assistant.features.ai.ClaudeAI()
+        deepgram       = com.kate.assistant.features.voice.DeepgramSTT(
+            onTranscript = { text -> handler.post { handleSpeech(text) } },
+            onError      = { err  -> Log.e(TAG, "Deepgram error: $err") }
+        )
+        networkMonitor = com.kate.assistant.core.network.KateNetworkMonitor(this).also { nm ->
+            nm.onOnline  = {
+                onlineMode = true
+                // Tap the AudioRecord stream into Deepgram when we come online
+                if (::speech.isInitialized && ::deepgram.isInitialized) {
+                    deepgram.connect()
+                    speech.onAudioFrame = { pcm, len ->
+                        if (!speech.isSpeaking()) deepgram.sendAudio(pcm, len)
+                    }
+                }
+                handler.post {
+                    KateEventBus.emit(KateEvent.OnlineModeChanged(online = true))
+                    updateNotification("Online · Always listening")
+                }
+            }
+            nm.onOffline = {
+                onlineMode = false
+                // Disconnect Deepgram and remove the audio tap — zero overhead offline
+                if (::speech.isInitialized) speech.onAudioFrame = null
+                if (::deepgram.isInitialized) deepgram.finalize()
+                handler.post {
+                    KateEventBus.emit(KateEvent.OnlineModeChanged(online = false))
+                    updateNotification("Offline · Always listening")
+                }
+            }
+            nm.start()
+            onlineMode = nm.isOnline
+            // If already online at startup, wire immediately
+            if (onlineMode) {
+                deepgram.connect()
+                // speech isn't initialised yet at this point — the tap is set
+                // in onInitComplete() after speech is created
+            }
+        }
+
         tts          = KateTts(this)
-        modelManager = ModelManager(this)
         bridge       = KateBridge(this)
         device       = KateDeviceController(this)
         hardware     = KateHardwareController(this)
@@ -109,47 +194,63 @@ class KateService : Service() {
         db           = KateDatabase.getDatabase(this)
         habits       = db.habitDao()
 
-        // ── Wire TTS callbacks ─────────────────────────────────
         tts.onSpeechActive = {
-            speech.setSpeaking(true)
-            Log.d(TAG, "TTS started — mic paused")
+            if (::speech.isInitialized) speech.setSpeaking(true)
         }
         tts.onSpeechIdle = {
-            speech.setSpeaking(false)
-            Log.d(TAG, "TTS finished — mic resumed")
+            if (::speech.isInitialized) speech.setSpeaking(false)
         }
 
-        // ── Model path injection ───────────────────────────────
-        // ModelManager returns the best available path:
-        //  - First launch  → small model (already present)
-        //  - After upgrade → daanzu-lgraph (129MB, WER 8.2% vs 11.5%)
+        val modelPath = File(filesDir, "vosk-model").absolutePath
+
         speech = KateSpeechManager(
             context   = this,
-            modelPath = modelManager.bestModelPath(),
+            modelPath = modelPath,
             onResult  = { text -> handler.post { handleSpeech(text) } },
             onError   = { err ->
                 when (err) {
                     "AUDIO_DEAD" -> {
-                        Log.w(TAG, "Audio dead — restarting mic in 1.5s")
-                        handler.postDelayed({
-                            speech.stopListening()
-                            speech.startListening()
-                            updateNotification("Always listening \uD83C\uDFA4")
-                        }, 1500)
+                        // Staged restart: stop fully first, then wait 500ms for AudioRecord
+                        // to release before opening a new one. This prevents the
+                        // STATE_INITIALIZED failure that caused the on/off mic instability.
+                        if (!micRestartPending) {
+                            micRestartPending = true
+                            Log.w(TAG, "Audio dead — staged restart in 2s")
+                            KateEventBus.emit(KateEvent.MicStateChanged(listening = false))
+                            handler.postDelayed({
+                                if (::speech.isInitialized) {
+                                    speech.stopListening()
+                                    // Give the OS time to release the mic session before
+                                    // allocating a new AudioRecord on top of it.
+                                    handler.postDelayed({
+                                        micRestartPending = false
+                                        if (::speech.isInitialized) {
+                                            speech.startListening()
+                                            updateNotification("Always listening")
+                                            KateEventBus.emit(KateEvent.MicStateChanged(listening = true))
+                                        }
+                                    }, 500)
+                                }
+                            }, 2000)
+                        }
+                    }
+                    "VOSK_MODEL_MISSING", "NO_MIC_PERMISSION" -> {
+                        // VOSK model is downloaded by CI (android-release.yml) at build time.
+                        // A sideloaded/debug build without that step will hit this path.
+                        // AudioRecord is already open so Android 14 FGS is satisfied.
+                        // We just can't transcribe — inform the user and stop retrying.
+                        Log.e(TAG, "STT unavailable: $err")
+                        updateNotification("Voice model missing")
+                        KateEventBus.emit(KateEvent.MicStateChanged(listening = false))
+                        handler.post {
+                            if (::tts.isInitialized)
+                                tts.speak("Voice recognition is unavailable on this build.")
+                        }
                     }
                     else -> Log.e(TAG, "Speech error: $err")
                 }
             }
         )
-
-        // ── Model upgrade callback ─────────────────────────────
-        // Fires on main thread when daanzu model finishes downloading.
-        // Seamlessly switches VOSK to better model without restart.
-        modelManager.onUpgradeReady = {
-            Log.d(TAG, "Upgraded model ready — switching VOSK")
-            speech.switchModel(modelManager.upgradeModelDir.absolutePath)
-            speak("Speech upgrade complete. I can now hear you much better.")
-        }
 
         bridge.updateAppList(loadInstalledApps())
         val formatted = runBlocking {
@@ -157,31 +258,48 @@ class KateService : Service() {
         }
         bridge.loadHabits(formatted)
         initDone = true
-        Log.d(TAG, "✅ All components initialised")
+        Log.d(TAG, "All components initialised")
     }
 
     private fun onInitComplete() {
         setupEventBus()
-        bridge.startAudio()
+
+        // If we came online before speech was ready, set the audio tap now
+        if (onlineMode && ::deepgram.isInitialized) {
+            speech.onAudioFrame = { pcm, len ->
+                if (!speech.isSpeaking()) deepgram.sendAudio(pcm, len)
+            }
+            if (!deepgram.isConnected()) deepgram.connect()
+        }
+
         speech.startListening()
+        updateNotification(if (onlineMode) "Online · Always listening" else "Offline · Always listening")
+        KateEventBus.emit(KateEvent.MicStateChanged(listening = true))
 
-        // ── Update notification ────────────────────────────────
-        updateNotification("Always listening \uD83C\uDFA4")
+        // RECEIVER_NOT_EXPORTED is required on Android 13+ (targetSdk 34).
+        // Without this flag, registerReceiver throws IllegalArgumentException on API 33+.
+        try {
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_POWER_CONNECTED)
+                addAction(Intent.ACTION_POWER_DISCONNECTED)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(chargingReceiver, filter, RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(chargingReceiver, filter)
+            }
+            chargingRegistered = true
+        } catch (e: Exception) {
+            Log.e(TAG, "Charging receiver failed: ${e.message}")
+        }
 
-        // ── Build dynamic grammar ──────────────────────────────
-        // Restricts VOSK to Kate's command vocabulary.
-        // Background noise/speech → "[unk]" → discarded.
-        // Dramatically cuts false commands in noisy environments.
-        handler.post { buildAndPushGrammar() }
+        // Grammar building intentionally omitted — it caused a race condition:
+        // updateGrammar() closes and recreates the VOSK Recognizer on the IO thread
+        // while onSpeechIdle fires recognizer.reset() on the main thread right after
+        // the greeting TTS finishes. Native VOSK code doesn't survive the collision.
+        // VOSK runs full vocabulary recognition — still fully functional.
 
-        // ── Start model upgrade (silent background download) ───
-        // Downloads daanzu-lgraph (129MB) once, then switches VOSK automatically.
-        // Shows a progress notification; user can ignore it.
-        modelManager.startUpgradeIfNeeded()
-
-        // Greet after TTS is ready
         handler.postDelayed({ greetUser() }, 1200)
-
         startWatchdog()
     }
 
@@ -189,10 +307,13 @@ class KateService : Service() {
     override fun onBind(i: Intent?) = null
 
     override fun onDestroy() {
-        if (::speech.isInitialized) speech.shutdown()
-        if (::bridge.isInitialized)  bridge.stopAudio()
-        if (::classifier.isInitialized) classifier.close()
-        if (::modelManager.isInitialized) modelManager.cancel()
+        if (chargingRegistered) try { unregisterReceiver(chargingReceiver) } catch (_: Exception) {}
+        if (::speech.isInitialized)        speech.shutdown()
+        if (::tts.isInitialized)           tts.shutdown()
+        if (::deepgram.isInitialized)      deepgram.shutdown()
+        if (::claudeAI.isInitialized)      claudeAI.shutdown()
+        if (::networkMonitor.isInitialized) networkMonitor.stop()
+        if (::classifier.isInitialized)    classifier.close()
         scope.cancel()
         super.onDestroy()
     }
@@ -204,68 +325,49 @@ class KateService : Service() {
     private fun handleSpeech(text: String) {
         if (!initDone) return
         val clean = text.trim()
-
         when {
-            clean.equals("WAKE", ignoreCase = true) -> {
-                speak("Yes, $USER_NAME?")
-                return
-            }
+            clean.equals("WAKE", ignoreCase = true) -> { speak("Yes, $userName?"); return }
             clean.length <= 2 -> return
         }
-
-        // If Kate is waiting for a follow-up answer, route there first
-        if (pendingContext != null) {
-            handlePendingContext(clean)
-            return
-        }
-
+        if (pendingContext != null) { handlePendingContext(clean); return }
         if (clean.length > 2) scope.launch { handleCommand(clean) }
     }
 
-    // ── Multi-turn context handler ────────────────────────────
     private fun handlePendingContext(answer: String) {
         val ctx  = pendingContext ?: return
         val data = pendingData
         pendingContext = null
         pendingData    = null
-
         scope.launch {
             when (ctx) {
                 "APP" -> {
                     speak("Opening $answer")
-                    val ok = launcher.launchByVoiceCommand(answer)
-                    if (!ok) speak("I couldn't find $answer, $USER_NAME.")
+                    if (!launcher.launchByVoiceCommand(answer))
+                        speak("I couldn't find $answer, $userName.")
                 }
                 "CALL" -> {
                     val number = lookupContact(answer)
-                    if (number != null) {
-                        speak("Calling $answer")
-                        handler.postDelayed({ makeCall(number) }, 1200)
-                    } else speak("I couldn't find $answer in your contacts.")
+                    if (number != null) { speak("Calling $answer"); handler.postDelayed({ makeCall(number) }, 1200) }
+                    else speak("I couldn't find $answer in your contacts.")
                 }
                 "MESSAGE_TO" -> {
                     speak("What should I say to $answer?")
-                    pendingContext = "MESSAGE_BODY"
-                    pendingData    = answer
+                    pendingContext = "MESSAGE_BODY"; pendingData = answer
                 }
                 "MESSAGE_BODY" -> {
-                    val name   = data ?: "them"
+                    val name = data ?: "them"
                     val number = lookupContact(name)
-                    if (number != null) {
-                        sendSms(number, answer)
-                        speak("Message sent to $name.")
-                    } else speak("Couldn't find $name in contacts.")
+                    if (number != null) { sendSms(number, answer); speak("Message sent to $name.") }
+                    else speak("Couldn't find $name in contacts.")
                 }
-                "SEARCH" -> {
-                    speak("Searching for $answer")
-                    launcher.search(answer)
+                "SEARCH" -> { speak("Searching for $answer"); launcher.search(answer) }
+                "SPOTIFY_SONG" -> {
+                    speak("Playing $answer on Spotify.")
+                    launcher.playOnSpotify(answer)
                 }
                 "REMINDER_TASK" -> {
                     val ms = data?.toLongOrNull() ?: 0L
-                    if (ms > 0) {
-                        reminder.schedule(answer, ms)
-                        speak("Got it. Reminder set for $answer.")
-                    }
+                    if (ms > 0) { reminder.schedule(answer, ms); speak("Reminder set for $answer.") }
                 }
             }
         }
@@ -278,147 +380,145 @@ class KateService : Service() {
     private suspend fun handleCommand(raw: String) {
         val lower = raw.lowercase().trim()
         Log.d(TAG, "CMD: $lower")
-
-        if (lower.all { !it.isLetter() }) return
+        if (lower.all { !it.isLetter() && !it.isDigit() }) return
 
         when {
 
             // ── Identity ──────────────────────────────────────
-            lower.contains("who are you") ||
-            lower.contains("what are you") ||
+            lower.contains("who are you") || lower.contains("what are you") ||
             lower.contains("about yourself") -> speak(
-                "I'm Kate — Kernel-level Autonomous Task Engine. " +
-                "Your personal offline voice assistant. I work with zero internet " +
-                "so your data stays private. I can open apps, make calls, send messages, " +
-                "search the web, control your phone hardware, set reminders, " +
-                "navigate your device, read and type on screen, and much more. " +
-                "The longer you use me, the smarter I get.")
+                "I'm Kate — your personal AI assistant built by Dewrabber's Tech Institute. " +
+                "I use cloud AI when you're connected for the smartest possible answers, " +
+                "and switch to on-device processing automatically when you're offline. " +
+                "I can open apps, make calls, send messages, control your phone, " +
+                "set reminders, answer questions, and much more.")
 
-            lower.contains("who made you") ||
-            lower.contains("who created you") ||
-            lower.contains("who built you") -> speak(
-                "I was built by $USER_NAME with the help of an AI development partner. " +
-                "I run on a C language brain with VOSK offline speech recognition. " +
-                "Truly one of a kind.")
+            lower.contains("who made you") || lower.contains("who created you") ||
+            lower.contains("who built you") -> speak("I was built by Dewrabber's Tech Institute, D.T.I.")
 
-            lower.contains("what can you do") ||
-            lower.contains("your capabilities") ||
+            lower.contains("what can you do") || lower.contains("your capabilities") ||
             lower.contains("list your features") -> speak(
-                "I can open any installed app, make phone calls, send texts, " +
+                "I can open and close any installed app, make phone calls, send texts, " +
                 "search Google, YouTube, and Maps, control your flashlight, volume, " +
-                "screen brightness, Do Not Disturb and silent mode, " +
+                "Do Not Disturb and silent mode, solve math problems, play music on Spotify, " +
                 "set reminders and timers, tell the time and date, check battery level, " +
-                "go back, go home, open recent apps, take screenshots, " +
-                "pull down notifications and quick settings, read your screen, " +
-                "and type for you. Just say the word.")
+                "lock your screen, toggle WiFi and Bluetooth, go back, go home, " +
+                "open recent apps, take screenshots, pull down notifications, " +
+                "read your screen, and type for you. Just say the word.")
 
-            lower.contains("how are you") ||
-            lower.contains("are you okay") -> speak(
-                "Running perfectly, $USER_NAME. All systems are green.")
+            lower.contains("how are you") || lower.contains("are you okay") ->
+                speak("Running perfectly, $userName. All systems are green.")
 
-            lower.contains("do you learn") ||
-            lower.contains("can you learn") ||
+            lower.contains("do you learn") || lower.contains("can you learn") ||
             lower.contains("do you remember") -> speak(
                 "Yes! I track your app usage and command patterns " +
                 "to predict what you need next. The more you use me, the sharper I get.")
 
             // ── Greetings ─────────────────────────────────────
-            lower.contains("hello") ||
-            lower.contains("hi kate") ||
+            lower.contains("hello") || lower.contains("hi kate") ||
             lower.contains("hey kate") ||
             lower.matches(Regex("good (morning|afternoon|evening|night).*")) -> {
                 val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
                 speak(when {
-                    h in 5..11  -> "Good morning, $USER_NAME! Ready to help."
+                    h in 5..11  -> "Good morning, $userName! Ready to help."
                     h in 12..16 -> "Good afternoon! What can I do for you?"
-                    h in 17..20 -> "Good evening, $USER_NAME. How can I help?"
-                    else        -> "Hello $USER_NAME! I'm awake. What do you need?"
+                    h in 17..20 -> "Good evening, $userName. How can I help?"
+                    else        -> "Hello $userName! I'm awake. What do you need?"
                 })
             }
 
-            // ── Time & Date ───────────────────────────────────
-            lower.contains("time") && !lower.contains("remind") &&
-            !lower.contains("timer") -> {
+            // ── Time ─────────────────────────────────────────
+            lower.contains("time") && !lower.contains("remind") && !lower.contains("timer") -> {
                 val t = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
                 speak("It's $t.")
             }
 
-            lower.contains("date") ||
-            lower.contains("what day") ||
-            lower.contains("day is it") -> {
+            // ── Date ─────────────────────────────────────────
+            lower.contains("date") || lower.contains("what day") || lower.contains("day is it") -> {
                 val d = SimpleDateFormat("EEEE, MMMM d, yyyy", Locale.getDefault()).format(Date())
                 speak("Today is $d.")
             }
 
             // ── Battery ───────────────────────────────────────
-            lower.contains("battery") ||
-            lower.contains("power level") ||
+            lower.contains("battery") || lower.contains("power level") ||
             lower.contains("how much charge") -> {
-                val bm = getSystemService(android.content.Context.BATTERY_SERVICE)
-                    as? android.os.BatteryManager
-                val pct = bm?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+                val bm = getSystemService(BATTERY_SERVICE) as? BatteryManager
+                val pct = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
                 val charging = bm?.isCharging ?: false
                 speak(when {
-                    pct < 0  -> "I couldn't read the battery level right now."
-                    charging -> "Battery is at $pct percent and currently charging."
-                    pct <= 15 -> "Battery is low — $pct percent. You should plug in soon, $USER_NAME."
-                    else     -> "Battery is at $pct percent."
+                    pct < 0   -> "I couldn't read the battery level right now."
+                    charging  -> "Battery is at $pct percent and currently charging."
+                    pct <= 15 -> "Battery is low at $pct percent. Plug in soon, $userName."
+                    else      -> "Battery is at $pct percent."
                 })
             }
 
-            // ── App launching ─────────────────────────────────
-            lower.startsWith("open ") ||
-            lower.startsWith("launch ") ||
-            lower.startsWith("start ") -> {
-                val app = lower
-                    .removePrefix("open").removePrefix("launch").removePrefix("start")
-                    .trim()
-                if (app.isBlank()) {
-                    speak("Which app should I open?")
-                    pendingContext = "APP"
-                } else {
-                    speak("Opening $app")
-                    val ok = launcher.launchByVoiceCommand(app)
-                    if (!ok) speak("I couldn't find $app. Want me to search for it?")
+            // ── Math ──────────────────────────────────────────
+            lower.contains("calculate") || lower.contains("how much is") ||
+            lower.contains("how many is") || lower.contains("square root") ||
+            lower.matches(Regex(".*\\b(plus|minus|times|divided by|divide|multiply|percent of|percent)\\b.*")) ||
+            lower.matches(Regex(".*\\d+\\s*[+\\-*/]\\s*\\d+.*")) ||
+            (lower.contains("what is") && lower.matches(
+                Regex(".*\\b(\\d+|plus|minus|times|divided|multiply|percent|sqrt|square root)\\b.*"))) -> {
+                val result = evaluateMath(lower)
+                if (result != null) speak("The answer is $result.")
+                else speak("Sorry, I couldn't calculate that. Try saying: calculate five plus three.")
+            }
+
+            // ── Close App ─────────────────────────────────────
+            lower.startsWith("close ") || lower.startsWith("force stop ") -> {
+                val appName = lower.removePrefix("close").removePrefix("force stop").trim()
+                if (appName.isBlank()) speak("Which app should I close?")
+                else {
+                    val killed = launcher.forceStopApp(appName)
+                    speak(if (killed) "Closed $appName." else "Could not close $appName.")
                 }
             }
 
-            // ── Music ─────────────────────────────────────────
-            lower.contains("play music") ||
-            lower.contains("play songs") ||
-            lower == "music" -> {
-                speak("Opening music."); launcher.openMusicApp()
+            // ── App launching ─────────────────────────────────
+            lower.startsWith("open ") || lower.startsWith("launch ") || lower.startsWith("start ") -> {
+                val app = lower.removePrefix("open").removePrefix("launch").removePrefix("start").trim()
+                if (app.isBlank()) { speak("Which app should I open?"); pendingContext = "APP" }
+                else {
+                    speak("Opening $app")
+                    if (!launcher.launchByVoiceCommand(app)) speak("I couldn't find $app.")
+                }
             }
+
+            // ── Spotify ───────────────────────────────────────
+            lower.contains("play") && lower.contains("spotify") -> {
+                val song = lower.replace("play","").replace("on spotify","").replace("spotify","").trim()
+                if (launcher.isSpotifyInstalled()) {
+                    if (song.isNotEmpty() && !song.equals("music", true) && !song.equals("song", true)) {
+                        speak("Playing $song on Spotify."); launcher.playOnSpotify(song)
+                    } else { speak("What song should I play on Spotify?"); pendingContext = "SPOTIFY_SONG" }
+                } else speak("Spotify is not installed.")
+            }
+
+            lower.contains("is spotify installed") || lower.contains("do i have spotify") ->
+                speak(if (launcher.isSpotifyInstalled()) "Yes, Spotify is installed." else "No, Spotify is not installed.")
+
+            lower.contains("play music") -> { speak("Opening music."); launcher.openMusicApp() }
 
             // ── Search ────────────────────────────────────────
-            lower.contains("search for") ||
-            lower.contains("google ") ||
-            lower.contains("look up") ||
-            lower.contains("search ") -> {
-                val q = lower
-                    .replace("search for", "").replace("google", "")
-                    .replace("look up", "").replace("search", "").trim()
-                if (q.isBlank()) {
-                    speak("What should I search?")
-                    pendingContext = "SEARCH"
-                } else {
-                    speak("Searching for $q"); launcher.search(q)
-                }
+            lower.contains("search for") || lower.contains("google ") ||
+            lower.contains("look up") || lower.contains("search ") -> {
+                val q = lower.replace("search for","").replace("google","")
+                    .replace("look up","").replace("search","").trim()
+                if (q.isBlank()) { speak("What should I search?"); pendingContext = "SEARCH" }
+                else { speak("Searching for $q"); launcher.search(q) }
             }
 
             lower.contains("youtube") -> {
-                val q = lower.replace("youtube", "").replace("search", "").trim()
+                val q = lower.replace("youtube","").replace("search","").trim()
                 speak(if (q.isBlank()) "Opening YouTube" else "Searching YouTube for $q")
                 launcher.search(q.ifBlank { "" }, SearchEngine.YOUTUBE)
             }
 
-            lower.contains("navigate to") ||
-            lower.contains("directions to") ||
-            lower.contains("take me to") ||
-            lower.contains("how to get to") -> {
-                val dest = lower
-                    .replace("navigate to", "").replace("directions to", "")
-                    .replace("take me to", "").replace("how to get to", "").trim()
+            lower.contains("navigate to") || lower.contains("directions to") ||
+            lower.contains("take me to") -> {
+                val dest = lower.replace("navigate to","").replace("directions to","")
+                    .replace("take me to","").trim()
                 if (dest.isBlank()) speak("Where should I navigate to?")
                 else { speak("Navigating to $dest"); launcher.search(dest, SearchEngine.MAPS) }
             }
@@ -426,14 +526,11 @@ class KateService : Service() {
             // ── Calls ─────────────────────────────────────────
             lower.startsWith("call ") -> {
                 val name = lower.removePrefix("call").trim()
-                if (name.isBlank()) {
-                    speak("Who should I call?"); pendingContext = "CALL"
-                } else {
+                if (name.isBlank()) { speak("Who should I call?"); pendingContext = "CALL" }
+                else {
                     val number = lookupContact(name)
-                    if (number != null) {
-                        speak("Calling $name")
-                        handler.postDelayed({ makeCall(number) }, 1400)
-                    } else speak("I couldn't find $name in your contacts, $USER_NAME.")
+                    if (number != null) { speak("Calling $name"); handler.postDelayed({ makeCall(number) }, 1400) }
+                    else speak("I couldn't find $name in your contacts.")
                 }
             }
 
@@ -443,22 +540,16 @@ class KateService : Service() {
                 else { speak("Dialling $number"); handler.postDelayed({ makeCall(number) }, 1200) }
             }
 
-            // ── SMS ───────────────────────────────────────────
-            lower.contains("send message to") ||
-            lower.contains("text ") ||
+            // ── Messages ──────────────────────────────────────
+            lower.contains("send message to") || lower.contains("text ") ||
             (lower.startsWith("message ") && lower.contains(" saying ")) -> {
-                val parts = lower
-                    .replace("send message to", "").replace("text", "").replace("message", "")
-                    .trim().split(" saying ")
+                val parts = lower.replace("send message to","").replace("text","")
+                    .replace("message","").trim().split(" saying ")
                 val name = parts.getOrNull(0)?.trim() ?: ""
                 val msg  = parts.getOrNull(1)?.trim() ?: ""
                 when {
                     name.isBlank() -> { speak("Who should I message?"); pendingContext = "MESSAGE_TO" }
-                    msg.isBlank()  -> {
-                        speak("What should I say to $name?")
-                        pendingContext = "MESSAGE_BODY"
-                        pendingData   = name
-                    }
+                    msg.isBlank()  -> { speak("What should I say to $name?"); pendingContext = "MESSAGE_BODY"; pendingData = name }
                     else -> {
                         val number = lookupContact(name)
                         if (number != null) { sendSms(number, msg); speak("Message sent to $name.") }
@@ -469,208 +560,362 @@ class KateService : Service() {
 
             // ── Flashlight ────────────────────────────────────
             lower.contains("torch on") || lower.contains("flashlight on") ||
-            lower.contains("turn on torch") || lower.contains("turn on flashlight") ||
-            lower.contains("turn on the torch") || lower.contains("light on") -> {
-                hardware.torchOn(); speak("Flashlight on.")
-            }
+            lower.contains("turn on torch") || lower.contains("turn on flashlight") || lower.contains("light on") ->
+                if (hardware.torchOn()) speak("Flashlight on.") else speak("Couldn't turn on flashlight.")
+
             lower.contains("torch off") || lower.contains("flashlight off") ||
-            lower.contains("turn off torch") || lower.contains("turn off flashlight") ||
-            lower.contains("light off") -> {
-                hardware.torchOff(); speak("Flashlight off.")
-            }
+            lower.contains("turn off torch") || lower.contains("turn off flashlight") || lower.contains("light off") ->
+                if (hardware.torchOff()) speak("Flashlight off.") else speak("Couldn't turn off flashlight.")
 
             // ── Volume ────────────────────────────────────────
             lower.contains("volume up") || lower.contains("increase volume") ||
-            lower.contains("turn up") || lower.contains("louder") -> {
-                hardware.volumeUp(); speak("Volume up.")
-            }
+            lower.contains("turn up") || lower.contains("louder") -> { hardware.volumeUp(); speak("Volume up.") }
+
             lower.contains("volume down") || lower.contains("decrease volume") ||
-            lower.contains("turn down") || lower.contains("quieter") || lower.contains("lower volume") -> {
-                hardware.volumeDown(); speak("Volume down.")
-            }
-            lower.contains("unmute") || lower.contains("turn on sound") -> {
-                hardware.unmuteAll(); speak("Unmuted.")
-            }
-            lower.contains("mute") || lower.contains("silent mode") -> {
-                hardware.muteAll(); speak("Muted.")
-            }
-            lower.contains("max volume") || lower.contains("full volume") -> {
-                repeat(15) { hardware.volumeUp() }; speak("Volume maxed.")
-            }
+            lower.contains("turn down") || lower.contains("quieter") -> { hardware.volumeDown(); speak("Volume down.") }
+
+            lower.contains("unmute") || lower.contains("turn on sound") -> { hardware.unmuteAll(); speak("Unmuted.") }
+
+            lower.contains("mute") || lower.contains("silent mode") -> { hardware.muteAll(); speak("Muted.") }
+
+            lower.contains("max volume") || lower.contains("full volume") ->
+                { repeat(15) { hardware.volumeUp() }; speak("Volume maxed.") }
 
             // ── Do Not Disturb ────────────────────────────────
-            lower.contains("do not disturb on") || lower.contains("don't disturb") ||
-            lower.contains("enable dnd") || lower == "silence" -> {
+            lower.contains("do not disturb on") || lower.contains("enable dnd") -> {
                 val nm = getSystemService(NotificationManager::class.java)
                 if (!nm.isNotificationPolicyAccessGranted) {
-                    speak("I need notification policy access. Opening settings.")
+                    speak("I need notification access. Opening settings.")
                     startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 } else { hardware.setDND(true); speak("Do Not Disturb enabled.") }
             }
-            lower.contains("do not disturb off") || lower.contains("disable dnd") ||
-            lower.contains("disable silence") -> {
+
+            lower.contains("do not disturb off") || lower.contains("disable dnd") -> {
                 val nm = getSystemService(NotificationManager::class.java)
                 if (!nm.isNotificationPolicyAccessGranted) {
-                    speak("I need notification policy access. Opening settings.")
+                    speak("I need notification access. Opening settings.")
                     startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 } else { hardware.setDND(false); speak("Do Not Disturb disabled.") }
             }
 
-            // ── Reminders / Timers ────────────────────────────
-            lower.contains("remind me") || lower.contains("set reminder") ||
-            lower.contains("set alarm") -> {
-                val ms = parseTime(lower)
-                if (ms > 0) {
-                    val task = lower
-                        .replace("remind me to", "").replace("remind me", "")
-                        .replace("set reminder to", "").replace("set reminder", "")
-                        .replace("set alarm for", "").replace("set alarm", "")
-                        .replace(Regex("in \\d+ (second|minute|hour)s?"), "").trim()
-                        .ifBlank { "reminder" }
-                    reminder.schedule(task, ms)
-                    val label = humanTime(ms)
-                    speak("Done! I'll remind you to $task in $label.")
+            // ── Lock Screen ───────────────────────────────────
+            lower.contains("lock phone") || lower.contains("lock screen") ||
+            lower.contains("lock the phone") -> {
+                if (dpm.isAdminActive(adminComponent)) {
+                    speak("Locking screen."); handler.postDelayed({ dpm.lockNow() }, 800)
                 } else {
-                    speak("When should I remind you? For example, remind me in 10 minutes.")
+                    speak("I need Device Admin permission to lock your screen. Opening settings.")
+                    startActivity(Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                        putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent)
+                        putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                            "Kate needs Device Admin to lock your screen on command.")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    })
                 }
             }
 
-            lower.contains("set timer") || lower.contains("timer for") ||
-            lower.contains("countdown") -> {
-                val ms = parseTime(lower)
-                if (ms > 0) {
-                    reminder.schedule("Timer", ms)
-                    speak("Timer set for ${humanTime(ms)}.")
-                } else speak("How long should the timer be?")
+            // ── WiFi ──────────────────────────────────────────
+            lower.contains("wifi on") || lower.contains("turn on wifi") || lower.contains("enable wifi") -> {
+                when (hardware.setWifi(true)) {
+                    KateHardwareController.WifiResult.TOGGLED -> speak("WiFi turned on.")
+                    KateHardwareController.WifiResult.NEEDS_PANEL -> {
+                        speak("Opening WiFi settings.")
+                        startActivity(Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                    KateHardwareController.WifiResult.FAILED -> speak("Couldn't toggle WiFi.")
+                }
             }
 
-            // ── Browser ───────────────────────────────────────
-            lower.contains("open browser") || lower.contains("open chrome") ||
-            lower.contains("open internet") -> {
-                speak("Opening browser."); launcher.openBrowser()
+            lower.contains("wifi off") || lower.contains("turn off wifi") || lower.contains("disable wifi") -> {
+                when (hardware.setWifi(false)) {
+                    KateHardwareController.WifiResult.TOGGLED -> speak("WiFi turned off.")
+                    KateHardwareController.WifiResult.NEEDS_PANEL -> {
+                        speak("Opening WiFi settings.")
+                        startActivity(Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                    KateHardwareController.WifiResult.FAILED -> speak("Couldn't toggle WiFi.")
+                }
+            }
+
+            lower.contains("open wifi") || lower.contains("wifi settings") -> {
+                speak("Opening WiFi settings.")
+                startActivity(Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+
+            // ── Bluetooth ─────────────────────────────────────
+            lower.contains("bluetooth on") || lower.contains("turn on bluetooth") || lower.contains("enable bluetooth") -> {
+                when (hardware.setBluetooth(true)) {
+                    KateHardwareController.BluetoothResult.TOGGLED -> speak("Bluetooth turned on.")
+                    KateHardwareController.BluetoothResult.NEEDS_SETTINGS -> {
+                        speak("Opening Bluetooth settings.")
+                        startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                    KateHardwareController.BluetoothResult.FAILED -> speak("Couldn't toggle Bluetooth.")
+                }
+            }
+
+            lower.contains("bluetooth off") || lower.contains("turn off bluetooth") || lower.contains("disable bluetooth") -> {
+                when (hardware.setBluetooth(false)) {
+                    KateHardwareController.BluetoothResult.TOGGLED -> speak("Bluetooth turned off.")
+                    KateHardwareController.BluetoothResult.NEEDS_SETTINGS -> {
+                        speak("Opening Bluetooth settings.")
+                        startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                    KateHardwareController.BluetoothResult.FAILED -> speak("Couldn't toggle Bluetooth.")
+                }
+            }
+
+            lower.contains("bluetooth settings") || lower.contains("open bluetooth") -> {
+                speak("Opening Bluetooth settings.")
+                startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+
+            // ── Reminders & Timers ────────────────────────────
+            lower.contains("remind me") || lower.contains("set reminder") || lower.contains("set alarm") -> {
+                val ms = parseTime(lower)
+                if (ms > 0) {
+                    val task = lower.replace("remind me to","").replace("remind me","")
+                        .replace("set reminder","").replace("set alarm","")
+                        .replace(Regex("in \\d+ (second|minute|hour)s?"),"").trim().ifBlank { "reminder" }
+                    reminder.schedule(task, ms)
+                    speak("Done. I'll remind you to $task in ${humanTime(ms)}.")
+                } else speak("When should I remind you? For example: remind me in 10 minutes.")
+            }
+
+            lower.contains("set timer") || lower.contains("timer for") -> {
+                val ms = parseTime(lower)
+                if (ms > 0) { reminder.schedule("Timer", ms); speak("Timer set for ${humanTime(ms)}.") }
+                else speak("How long should the timer be?")
             }
 
             // ── Accessibility navigation ──────────────────────
-            lower.contains("go back") || lower == "back" -> {
+            lower.contains("go back") || lower == "back" ->
                 KateAccessibilityService.instance?.goBack()
                     ?: speak("Please enable Kate accessibility service first.")
-            }
-            lower.contains("go home") || lower == "home" ||
-            lower.contains("home screen") -> {
+
+            lower.contains("go home") || lower == "home" || lower.contains("home screen") ->
                 KateAccessibilityService.instance?.goHome()
                     ?: speak("Accessibility service needed.")
-            }
-            lower.contains("recent apps") || lower.contains("show recents") ||
-            lower.contains("open recents") -> {
+
+            lower.contains("recent apps") || lower.contains("show recents") ->
                 KateAccessibilityService.instance?.openRecents()
                     ?: speak("Accessibility service needed.")
+
+            lower.contains("take screenshot") || lower == "screenshot" -> {
+                KateAccessibilityService.instance?.takeScreenshot()
+                    ?: speak("Accessibility service needed.")
+                if (KateAccessibilityService.instance != null) speak("Screenshot taken.")
             }
-            lower.contains("take screenshot") || lower.contains("screenshot") -> {
-                if (KateAccessibilityService.instance != null) {
-                    KateAccessibilityService.instance?.takeScreenshot()
-                    speak("Screenshot taken.")
-                } else speak("Accessibility service needed.")
-            }
-            lower.contains("show notifications") || lower.contains("open notifications") ||
-            lower.contains("pull down notifications") -> {
+
+            lower.contains("show notifications") || lower.contains("pull down notifications") ->
                 KateAccessibilityService.instance?.showNotifications()
                     ?: speak("Accessibility service needed.")
-            }
-            lower.contains("quick settings") || lower.contains("open quick settings") -> {
+
+            lower.contains("quick settings") || lower.contains("open quick settings") ->
                 KateAccessibilityService.instance?.openQuickSettings()
                     ?: speak("Accessibility service needed.")
-            }
+
             lower.contains("read screen") || lower.contains("what's on screen") ||
             lower.contains("what is on screen") -> {
-                if (KateAccessibilityService.instance != null) {
-                    val content = KateAccessibilityService.instance?.readScreen() ?: ""
-                    if (content.isNotBlank()) speak(content.take(400))
-                    else speak("Nothing readable on screen right now.")
-                } else speak("Please enable Kate accessibility service to read the screen.")
+                val content = KateAccessibilityService.instance?.readScreen() ?: ""
+                if (content.isNotBlank()) speak(content.take(400))
+                else speak("Nothing readable on screen right now.")
             }
+
             lower.startsWith("type ") || lower.startsWith("write ") -> {
                 val typing = lower.removePrefix("type").removePrefix("write").trim()
-                if (KateAccessibilityService.instance != null) {
-                    val ok = KateAccessibilityService.instance?.ghostType(typing) ?: false
-                    speak(if (ok) "Done." else "No text field was found. Please tap a text field first.")
-                } else speak("Please enable Kate accessibility service to type.")
+                val ok = KateAccessibilityService.instance?.ghostType(typing) ?: false
+                speak(if (ok) "Done." else "No text field found. Tap a text field first.")
             }
 
-            // ── Wifi / Bluetooth (open settings) ─────────────
-            lower.contains("open wifi") || lower.contains("wifi settings") -> {
-                speak("Opening Wi-Fi settings.")
-                startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }
-            lower.contains("bluetooth settings") || lower.contains("open bluetooth") -> {
-                speak("Opening Bluetooth settings.")
-                startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }
+            // ── System shortcuts ──────────────────────────────
             lower.contains("open settings") || lower == "settings" -> {
                 speak("Opening settings.")
-                startActivity(Intent(Settings.ACTION_SETTINGS)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             }
 
-            // ── Stop listening ────────────────────────────────
+            lower.contains("open browser") || lower.contains("open chrome") ->
+                { speak("Opening browser."); launcher.openBrowser() }
+
+            // ── Stop / Repeat ─────────────────────────────────
             lower.contains("stop listening") || lower.contains("goodbye kate") ||
             lower.contains("bye kate") || lower.contains("sleep kate") -> {
-                speak("Goodbye, $USER_NAME! I'll be here when you need me.")
-                handler.postDelayed({ speech.stopListening() }, 2500)
+                speak("Goodbye, $userName! I'll be here when you need me.")
+                handler.postDelayed({ if (::speech.isInitialized) speech.stopListening() }, 2500)
             }
 
-            // ── Repeat ────────────────────────────────────────
             lower.contains("say that again") || lower.contains("repeat that") ||
-            lower.contains("what did you say") -> {
+            lower.contains("what did you say") ->
                 tts.speak(lastSpoken.ifBlank { "I haven't said anything yet." })
-            }
 
             // ── TFLite ML fallback ────────────────────────────
             else -> {
                 if (lower.length > 2) {
-                    val intent = try {
-                        withContext(Dispatchers.IO) { classifier.classify(raw) }
-                    } catch (_: Exception) { "UNKNOWN" }
-                    Log.d(TAG, "TFLite intent: $intent")
-                    when (intent) {
-                        "OPEN_APP"       -> { speak("Which app should I open?"); pendingContext = "APP" }
-                        "MEDIA_CONTROL"  -> { speak("Opening music."); launcher.openMusicApp() }
-                        "COMMUNICATION"  -> { speak("Who should I contact?");  pendingContext = "CALL" }
-                        "REMINDER"       -> speak("When should I remind you? Say for example: in 10 minutes.")
-                        "SYSTEM_CONTROL" -> speak("What system setting should I change?")
-                        else             -> speak(nextFallback())
+                    // ── Online path: Claude AI ─────────────────────────────
+                    // Try Claude first when connected and quota allows.
+                    // The user never sees the switch — it's seamless.
+                    // handleCommand is already a suspend fun called from scope.launch,
+                    // so we can call suspend fns directly — no runBlocking needed.
+                    val usedOnline = if (onlineMode) {
+                        val canUse = usageManager.canMakeOnlineRequest()
+                        if (canUse) {
+                            val response = claudeAI.respond(
+                                userText  = raw,
+                                userName  = userName,
+                                history   = conversationHistory.toList()
+                            )
+                            if (response != null) {
+                                conversationHistory.addLast(Pair("user",      raw))
+                                conversationHistory.addLast(Pair("assistant", response))
+                                while (conversationHistory.size > 20) conversationHistory.removeFirst()
+                                usageManager.recordRequest()
+                                // Finalize Deepgram session for this utterance
+                                // and reopen for the next one
+                                if (::deepgram.isInitialized) {
+                                    deepgram.finalize()
+                                    // Reopen after TTS finishes so we don't capture echo
+                                    handler.postDelayed({
+                                        if (onlineMode && ::deepgram.isInitialized)
+                                            deepgram.connect()
+                                    }, 1500)
+                                }
+                                speak(response)
+                                true
+                            } else false
+                        } else {
+                            val msg = usageManager.limitMessage()
+                            speak(msg)
+                            true
+                        }
+                    } else false
+
+                    // ── Offline fallback: local intent classifier ──────────
+                    if (!usedOnline) {
+                        val intent = try {
+                            withContext(Dispatchers.IO) { classifier.classify(raw) }
+                        } catch (_: Exception) { "UNKNOWN" }
+                        when (intent) {
+                            "OPEN_APP"       -> { speak("Which app should I open?"); pendingContext = "APP" }
+                            "MEDIA_CONTROL"  -> { speak("Opening music."); launcher.openMusicApp() }
+                            "COMMUNICATION"  -> { speak("Who should I contact?"); pendingContext = "CALL" }
+                            "REMINDER"       -> speak("When should I remind you? Say for example: in 10 minutes.")
+                            "SYSTEM_CONTROL" -> speak("What system setting should I change?")
+                            else             -> speak(nextFallback())
+                        }
                     }
                 }
             }
         }
 
-        // Log command for self-training
         try { bridge.processText(raw) } catch (_: Exception) {}
     }
 
     // ══════════════════════════════════════════════════════════
-    // SPEAK — no more manual timing; TTS callbacks handle it
+    // MATH ENGINE
+    // ══════════════════════════════════════════════════════════
+
+    private fun evaluateMath(input: String): String? {
+        return try {
+            var expr = input
+                .replace(Regex("calculate|compute|solve|evaluate"), "")
+                .replace("what is", "").replace("what's", "")
+                .replace("how much is", "").replace("how many is", "")
+                .replace("the answer to", "").replace("equals", "").trim()
+
+            // Percentage of: "20 percent of 500"
+            val pctOf = Regex("(\\d+(?:\\.\\d+)?)\\s*percent\\s*of\\s*(\\d+(?:\\.\\d+)?)")
+            pctOf.find(expr)?.let {
+                val pct = it.groupValues[1].toDouble()
+                val num = it.groupValues[2].toDouble()
+                return formatMathResult(pct / 100.0 * num)
+            }
+
+            // Square root
+            if (expr.contains("square root") || expr.contains("sqrt")) {
+                val cleaned = wordsToDigits(
+                    expr.replace(Regex("square root of|square root|sqrt"), "").trim())
+                return cleaned.toDoubleOrNull()
+                    ?.let { kotlin.math.sqrt(it) }
+                    ?.let { formatMathResult(it) }
+            }
+
+            // Word operators → symbols
+            expr = expr
+                .replace("plus", "+").replace(" add ", " + ")
+                .replace("minus", "-").replace("subtract", "-").replace("take away", "-")
+                .replace("times", "*").replace("multiplied by", "*").replace("multiply", "*").replace("into", "*")
+                .replace("divided by", "/").replace("divide by", "/").replace("over", "/")
+                .replace(Regex("\\s*percent\\b"), " / 100")
+
+            // Number words → digits
+            expr = wordsToDigits(expr)
+
+            // Strip non-math characters
+            expr = expr.replace(Regex("[^0-9+\\-*/.() ]"), " ").trim()
+            if (expr.isBlank()) return null
+
+            val result = SimpleEval.eval(expr) ?: return null
+            formatMathResult(result)
+        } catch (e: Exception) { null }
+    }
+
+    private fun wordsToDigits(text: String): String {
+        val map = mapOf(
+            "zero" to "0", "one" to "1", "two" to "2", "three" to "3",
+            "four" to "4", "five" to "5", "six" to "6", "seven" to "7",
+            "eight" to "8", "nine" to "9", "ten" to "10",
+            "eleven" to "11", "twelve" to "12", "thirteen" to "13",
+            "fourteen" to "14", "fifteen" to "15", "sixteen" to "16",
+            "seventeen" to "17", "eighteen" to "18", "nineteen" to "19",
+            "twenty" to "20", "thirty" to "30", "forty" to "40",
+            "fifty" to "50", "sixty" to "60", "seventy" to "70",
+            "eighty" to "80", "ninety" to "90", "hundred" to "100",
+            "thousand" to "1000", "million" to "1000000"
+        )
+        var result = text
+        map.entries.sortedByDescending { it.key.length }
+            .forEach { (word, digit) -> result = result.replace(Regex("\\b$word\\b"), digit) }
+        return result
+    }
+
+    private fun formatMathResult(d: Double): String = when {
+        d.isInfinite() -> "undefined — you cannot divide by zero"
+        d.isNaN()      -> "undefined"
+        d == kotlin.math.floor(d) && kotlin.math.abs(d) < 1_000_000_000 -> d.toLong().toString()
+        else           -> "%.6f".format(d).trimEnd('0').trimEnd('.')
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // SPEAK
     // ══════════════════════════════════════════════════════════
 
     private var lastSpoken = ""
+    private fun speak(text: String) { lastSpoken = text; tts.speak(text) }
 
-    private fun speak(text: String) {
-        lastSpoken = text
-        tts.speak(text)
-    }
-
-    // ── Rotating fallbacks ────────────────────────────────────
     private val fallbacks = listOf(
-        "Hmm, I didn't quite get that, $USER_NAME. Say it again?",
+        "Hmm, I didn't quite get that, $userName. Say it again?",
         "Sorry, I'm not sure I understood. Try once more?",
         "I'm still learning! Could you rephrase that?",
         "My ears must have slipped — say that again?"
     )
     private var fallbackIdx = 0
     private fun nextFallback() = fallbacks[fallbackIdx++ % fallbacks.size]
+
+    // ══════════════════════════════════════════════════════════
+    // GREETING
+    // ══════════════════════════════════════════════════════════
+
+    private fun greetUser() {
+        val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        speak(when {
+            h in 5..11  -> "Good morning, $userName! Kate is online and always listening."
+            h in 12..16 -> "Good afternoon, $userName! Kate here. What can I do for you?"
+            h in 17..20 -> "Good evening, $userName! Kate is ready. How can I help?"
+            else        -> "Kate is online, $userName. Always here when you need me."
+        })
+    }
 
     // ══════════════════════════════════════════════════════════
     // EVENT BUS
@@ -681,156 +926,11 @@ class KateService : Service() {
             when (event) {
                 is KateEvent.WakeWordDetected -> Log.d(TAG, "Wake word via C bridge")
                 is KateEvent.HabitUpdate      -> saveHabit(event)
-                is KateEvent.AppOpened        -> {
-                    journal.logAppOpen(event.packageName)
-                    proactive.evaluate()
-                }
-                is KateEvent.Error -> Log.e(TAG, "Bridge error: ${event.message}")
-                else               -> Unit
+                is KateEvent.AppOpened        -> { journal.logAppOpen(event.packageName); proactive.evaluate() }
+                is KateEvent.Error            -> Log.e(TAG, "Bridge error: ${event.message}")
+                else                          -> Unit
             }
         }
-    }
-
-    // ══════════════════════════════════════════════════════════
-    // GRAMMAR BUILDER
-    // ══════════════════════════════════════════════════════════
-
-    /**
-     * Builds Kate's full command vocabulary and pushes it to VOSK.
-     * Called once at startup (on main thread, fast enough).
-     * Re-call any time apps are installed/uninstalled or contacts change.
-     *
-     * How it works: VOSK only tries to match phrases in this list.
-     * Anything else → "[unk]" → KateSpeechManager drops it silently.
-     * This is what eliminates random words from background noise.
-     */
-    private fun buildAndPushGrammar() {
-        scope.launch(Dispatchers.IO) {
-            val phrases = mutableListOf(
-                // Wake words
-                "hey kate", "hi kate", "okay kate", "ok kate",
-
-                // Identity
-                "who are you", "what are you", "what can you do",
-                "how are you", "who made you", "who created you",
-
-                // Greetings
-                "hello", "good morning", "good afternoon", "good evening", "good night",
-
-                // Time & date
-                "what time is it", "what is the time", "time",
-                "what day is it", "what is today", "what is the date",
-                "what is today's date", "today's date",
-
-                // Battery
-                "battery level", "battery percentage", "how much battery",
-                "check battery", "power level", "how much charge",
-
-                // Volume
-                "volume up", "increase volume", "turn up", "louder",
-                "volume down", "decrease volume", "turn down", "quieter", "lower volume",
-                "mute", "unmute", "silent mode", "max volume", "full volume", "turn on sound",
-
-                // Flashlight
-                "torch on", "flashlight on", "turn on torch", "turn on flashlight",
-                "turn on the torch", "light on",
-                "torch off", "flashlight off", "turn off torch", "turn off flashlight", "light off",
-
-                // Navigation
-                "go back", "back", "go home", "home", "home screen",
-                "recent apps", "show recents", "open recents",
-                "take screenshot", "screenshot",
-                "show notifications", "open notifications", "pull down notifications",
-                "quick settings", "open quick settings",
-                "read screen", "what is on screen", "what's on screen",
-
-                // System
-                "open settings", "settings", "open wifi", "wifi settings",
-                "bluetooth settings", "open bluetooth",
-                "do not disturb on", "do not disturb off", "enable dnd", "disable dnd",
-
-                // Search
-                "search for [unk]", "google [unk]", "look up [unk]", "search [unk]",
-                "youtube [unk]", "navigate to [unk]", "directions to [unk]",
-
-                // Calls
-                "call [unk]", "dial [unk]",
-
-                // Messages
-                "send message to [unk]", "text [unk]", "message [unk]",
-
-                // Reminders
-                "remind me to [unk]", "set reminder", "set alarm",
-                "set timer", "timer for [unk]",
-
-                // Apps (generic)
-                "open [unk]", "launch [unk]", "start [unk]",
-                "play music", "play songs", "music",
-                "open browser", "open chrome", "open internet",
-
-                // Stop
-                "stop listening", "goodbye kate", "bye kate", "sleep kate",
-                "say that again", "repeat that", "what did you say",
-
-                // Typing
-                "type [unk]", "write [unk]"
-            )
-
-            // Add every installed app name as "open <name>"
-            getInstalledAppNames().forEach { name ->
-                phrases.add("open $name")
-                phrases.add("launch $name")
-            }
-
-            // Add every contact name as "call <name>" and "text <name>"
-            getContactNames().forEach { name ->
-                phrases.add("call $name")
-                phrases.add("text $name")
-                phrases.add("message $name")
-            }
-
-            Log.d(TAG, "Grammar: ${phrases.size} phrases built")
-            withContext(Dispatchers.Main) {
-                speech.updateGrammar(phrases)
-            }
-        }
-    }
-
-    private fun getInstalledAppNames(): List<String> =
-        packageManager.getInstalledApplications(0)
-            .map { packageManager.getApplicationLabel(it).toString().lowercase().trim() }
-            .filter { it.isNotBlank() && it.length > 1 }
-            .distinct()
-
-    private fun getContactNames(): List<String> = try {
-        val names = mutableListOf<String>()
-        contentResolver.query(
-            android.provider.ContactsContract.Contacts.CONTENT_URI,
-            arrayOf(android.provider.ContactsContract.Contacts.DISPLAY_NAME),
-            null, null, null
-        )?.use { c ->
-            while (c.moveToNext()) {
-                val name = c.getString(0)?.lowercase()?.trim()
-                if (!name.isNullOrBlank()) names.add(name)
-            }
-        }
-        names
-    } catch (e: Exception) {
-        Log.e(TAG, "Contacts read: ${e.message}"); emptyList()
-    }
-
-    // ══════════════════════════════════════════════════════════
-    // GREETING
-    // ══════════════════════════════════════════════════════════
-
-    private fun greetUser() {
-        val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
-        speak(when {
-            hour in 5..11  -> "Good morning, $USER_NAME! Kate is online and always listening."
-            hour in 12..16 -> "Good afternoon, $USER_NAME! Kate here. What can I do for you?"
-            hour in 17..20 -> "Good evening, $USER_NAME! Kate is ready. How can I help?"
-            else           -> "Kate is online, $USER_NAME. Always here when you need me."
-        })
     }
 
     // ══════════════════════════════════════════════════════════
@@ -838,44 +938,37 @@ class KateService : Service() {
     // ══════════════════════════════════════════════════════════
 
     private fun startForegroundNow() {
-        val channel = NotificationChannel(
-            CHANNEL_ID, "Kate Assistant", NotificationManager.IMPORTANCE_LOW)
-        channel.setShowBadge(false)
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-
+        val ch = NotificationChannel(CHANNEL_ID, "Kate Assistant", NotificationManager.IMPORTANCE_LOW)
+        ch.setShowBadge(false)
+        getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
         val notif = buildNotification("Starting up...")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        // FOREGROUND_SERVICE_TYPE_MICROPHONE requires API 30 (R).
+        // API 26-29: use 2-arg startForeground — mic still works without the type declaration.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
             startForeground(NOTIF_ID, notif)
         }
     }
 
-    // ── Update notification — must call startForeground again ─
-    // notify() alone does NOT reliably update foreground service
-    // notifications on many OEM Android builds (Tecno, Infinix, etc.)
     private fun updateNotification(text: String) {
         val notif = buildNotification(text)
-        // Update via notify first (fast path)
         getSystemService(NotificationManager::class.java).notify(NOTIF_ID, notif)
-        // Then re-call startForeground with same ID — guaranteed to update on all OEMs
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
             startForeground(NOTIF_ID, notif)
         }
     }
 
-    private fun buildNotification(text: String): Notification {
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun buildNotification(text: String): Notification =
+        NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Kate")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setOngoing(true)
-            .setSilent(true)
+            .setOngoing(true).setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
-    }
 
     // ══════════════════════════════════════════════════════════
     // WATCHDOG
@@ -884,11 +977,19 @@ class KateService : Service() {
     private fun startWatchdog() {
         handler.postDelayed(object : Runnable {
             override fun run() {
-                if (initDone && !speech.isListening() && !speech.isSpeaking()) {
+                // Only restart if mic is genuinely stopped AND no restart is already
+                // in flight from the AUDIO_DEAD handler. Without this guard, the
+                // watchdog could stack a second startListening() during the 2.5s
+                // restart window, causing a double AudioRecord allocation.
+                if (initDone && ::speech.isInitialized &&
+                    !micRestartPending &&
+                    !speech.isListening() && !speech.isSpeaking()) {
                     Log.w(TAG, "Watchdog: restarting speech")
                     speech.startListening()
+                    updateNotification("Always listening")
+                    KateEventBus.emit(KateEvent.MicStateChanged(listening = true))
                 }
-                handler.postDelayed(this, 30_000L)  // 30s — was 60s
+                handler.postDelayed(this, 30_000L)
             }
         }, 30_000L)
     }
@@ -955,4 +1056,62 @@ class KateService : Service() {
         packageManager.getInstalledApplications(0).map {
             "${packageManager.getApplicationLabel(it).toString().lowercase()}|${it.packageName}"
         }.toTypedArray()
+}
+
+// ══════════════════════════════════════════════════════════════
+// SIMPLE EXPRESSION EVALUATOR — no external library needed.
+// Handles: +, -, *, /, parentheses, correct operator precedence.
+// ══════════════════════════════════════════════════════════════
+
+private object SimpleEval {
+
+    fun eval(expr: String): Double? = try {
+        Parser(tokenize(expr.replace(" ", ""))).parseExpr()
+    } catch (_: Exception) { null }
+
+    private fun tokenize(expr: String): List<String> {
+        val tokens = mutableListOf<String>()
+        var i = 0
+        while (i < expr.length) {
+            when {
+                expr[i].isDigit() || expr[i] == '.' -> {
+                    val start = i
+                    while (i < expr.length && (expr[i].isDigit() || expr[i] == '.')) i++
+                    tokens.add(expr.substring(start, i))
+                }
+                expr[i] in "+-*/()" -> { tokens.add(expr[i].toString()); i++ }
+                else -> i++
+            }
+        }
+        return tokens
+    }
+
+    private class Parser(private val t: List<String>) {
+        private var i = 0
+        fun parseExpr(): Double {
+            var v = parseTerm()
+            while (i < t.size && t[i] in listOf("+", "-")) {
+                val op = t[i++]; val r = parseTerm()
+                v = if (op == "+") v + r else v - r
+            }
+            return v
+        }
+        private fun parseTerm(): Double {
+            var v = parseFactor()
+            while (i < t.size && t[i] in listOf("*", "/")) {
+                val op = t[i++]; val r = parseFactor()
+                v = if (op == "*") v * r else { if (r == 0.0) throw ArithmeticException("div/0"); v / r }
+            }
+            return v
+        }
+        private fun parseFactor(): Double {
+            if (i >= t.size) throw RuntimeException("Unexpected end")
+            return when {
+                t[i] == "(" -> { i++; parseExpr().also { if (i < t.size && t[i] == ")") i++ } }
+                t[i] == "-" -> { i++; -parseFactor() }
+                t[i].toDoubleOrNull() != null -> t[i++].toDouble()
+                else -> throw RuntimeException("Bad token: ${t[i]}")
+            }
+        }
+    }
 }
