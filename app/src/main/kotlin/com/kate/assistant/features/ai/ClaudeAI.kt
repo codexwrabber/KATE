@@ -65,6 +65,12 @@ class ClaudeAI {
         userName: String,
         history: List<Pair<String, String>> = emptyList()
     ): String? = withContext(Dispatchers.IO) {
+        if (BuildConfig.CLAUDE_API_KEY.isBlank()) {
+            android.util.Log.e("ClaudeAI",
+                "CLAUDE_API_KEY is empty — key not injected by CI. " +
+                "Add it to GitHub repo secrets as CLAUDE_API_KEY.")
+            return@withContext null
+        }
         try {
             val model = if (userText.split(" ").size <= HAIKU_MAX_INPUT_WORDS)
                 MODEL_HAIKU else MODEL_SONNET
