@@ -173,10 +173,9 @@ fun KateNavGraph(prefs: KatePreferences, onReadyToLaunch: () -> Unit) {
         }
 
         composable("onboarding") {
-            val scope = androidx.lifecycle.rememberCoroutineScope()
+            val scope = rememberCoroutineScope()
             OnboardingScreen(onNameEntered = { name ->
                 userName = name
-                // Persist name + mark onboarding complete before navigating
                 scope.launch {
                     prefs.setUserName(name)
                     prefs.setOnboardingComplete(true)
@@ -188,7 +187,7 @@ fun KateNavGraph(prefs: KatePreferences, onReadyToLaunch: () -> Unit) {
         }
 
         composable("privacy") {
-            val scope = androidx.lifecycle.rememberCoroutineScope()
+            val scope = rememberCoroutineScope()
             PrivacyScreen(userName = userName.ifBlank { "there" }, onAccepted = {
                 scope.launch { prefs.setPrivacyAccepted(true) }
                 onReadyToLaunch()
