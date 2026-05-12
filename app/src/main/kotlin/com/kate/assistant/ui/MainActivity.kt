@@ -12,12 +12,22 @@ import android.text.TextUtils
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.*
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import com.kate.assistant.data.preferences.KatePreferences
 import com.kate.assistant.services.KateService
-import com.kate.assistant.ui.screens.HomeScreen
+import com.kate.assistant.ui.screens.*
 import com.kate.assistant.ui.theme.KateTheme
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+
+    private lateinit var prefs: KatePreferences
 
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -25,7 +35,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { KateTheme { HomeScreen() } }
+        prefs = KatePreferences(this)
+
+        // Ensure device ID exists from first boot
+        lifecycleScope.launch { prefs.ensureDeviceId() }
+
+        setContent {
+            KateTheme {
+                KateNavGraph(prefs = prefs, onReadyToLaunch = {
+                    startKateService()
+                    requestBatteryOptimizationExemption()
+                    Handler(Looper.getMainLooper()).postDelayed({ checkAccessibility() }, 6000)
+                })
+            }
+        }
+
         checkAndRequestPermissions()
     }
 
@@ -48,18 +72,13 @@ class MainActivity : ComponentActivity() {
         else permLauncher.launch(needed.toTypedArray())
     }
 
-    private fun launchKate() {
+    private fun launchKate() { /* permissions satisfied — NavGraph handles routing */ }
+
+    private fun startKateService() {
         val intent = Intent(this, KateService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             startForegroundService(intent)
         else startService(intent)
-
-        // Ask user to disable battery optimization — #1 cause of mic dying
-        // on OEM phones (Tecno, Infinix, Samsung, Xiaomi, etc.)
-        requestBatteryOptimizationExemption()
-
-        // Check accessibility 6s after launch — after Kate greets user
-        Handler(Looper.getMainLooper()).postDelayed({ checkAccessibility() }, 6000)
     }
 
     @Suppress("DEPRECATION")
@@ -73,9 +92,7 @@ class MainActivity : ComponentActivity() {
                             data = android.net.Uri.parse("package:$packageName")
                         }
                     )
-                } catch (_: Exception) {
-                    // Some OEMs block this intent — silently ignore
-                }
+                } catch (_: Exception) {}
             }
         }
     }
@@ -99,5 +116,101 @@ class MainActivity : ComponentActivity() {
             }
             false
         } catch (_: Exception) { false }
+    }
+}
+
+// ── Navigation graph ──────────────────────────────────────────────────────────
+
+@Composable
+fun KateNavGraph(prefs: KatePreferences, onReadyToLaunch: () -> Unit) {
+
+    val navController  = rememberNavController()
+    var splashDone     by remember { mutableStateOf(false) }
+    var onboardingDone by remember { mutableStateOf<Boolean?>(null) }
+    var privacyDone    by remember { mutableStateOf<Boolean?>(null) }
+    var userName       by remember { mutableStateOf("") }
+    var isSubscribed   by remember { mutableStateOf(false) }
+    var dailyUsed      by remember { mutableStateOf(0) }
+
+    // Load persisted state
+    val onboardingFlow by prefs.onboardingComplete.collectAsState(initial = null)
+    val privacyFlow    by prefs.privacyAccepted.collectAsState(initial = null)
+    val nameFlow       by prefs.userName.collectAsState(initial = "")
+    val subFlow        by prefs.isSubscribed.collectAsState(initial = false)
+    val usageFlow      by prefs.dailyRequestCount.collectAsState(initial = 0)
+
+    LaunchedEffect(onboardingFlow, privacyFlow, nameFlow, subFlow, usageFlow) {
+        if (onboardingFlow == null || privacyFlow == null) return@LaunchedEffect
+        onboardingDone = onboardingFlow
+        privacyDone    = privacyFlow
+        userName       = nameFlow
+        isSubscribed   = subFlow
+        dailyUsed      = usageFlow
+    }
+
+    // Determine start destination once we have data
+    val startDestination = remember(splashDone, onboardingDone, privacyDone) {
+        when {
+            !splashDone                -> "splash"
+            onboardingDone == false    -> "onboarding"
+            privacyDone == false       -> "privacy"
+            else                       -> "home"
+        }
+    }
+
+    NavHost(navController = navController, startDestination = "splash") {
+
+        composable("splash") {
+            SplashScreen(onFinished = {
+                splashDone = true
+                val next = when {
+                    onboardingDone == false -> "onboarding"
+                    privacyDone == false    -> "privacy"
+                    else                    -> { onReadyToLaunch(); "home" }
+                }
+                navController.navigate(next) { popUpTo("splash") { inclusive = true } }
+            })
+        }
+
+        composable("onboarding") {
+            val scope = androidx.lifecycle.rememberCoroutineScope()
+            OnboardingScreen(onNameEntered = { name ->
+                userName = name
+                // Persist name + mark onboarding complete before navigating
+                scope.launch {
+                    prefs.setUserName(name)
+                    prefs.setOnboardingComplete(true)
+                }
+                navController.navigate("privacy") {
+                    popUpTo("onboarding") { inclusive = true }
+                }
+            })
+        }
+
+        composable("privacy") {
+            val scope = androidx.lifecycle.rememberCoroutineScope()
+            PrivacyScreen(userName = userName.ifBlank { "there" }, onAccepted = {
+                scope.launch { prefs.setPrivacyAccepted(true) }
+                onReadyToLaunch()
+                navController.navigate("home") { popUpTo("privacy") { inclusive = true } }
+            })
+        }
+
+        composable("home") {
+            HomeScreen(
+                userName     = userName,
+                isSubscribed = isSubscribed,
+                onOpenSub    = { navController.navigate("subscription") }
+            )
+        }
+
+        composable("subscription") {
+            SubscriptionScreen(
+                isSubscribed = isSubscribed,
+                dailyUsed    = dailyUsed,
+                onUpgrade    = { /* Phase 3: launch Play Billing flow */ },
+                onBack       = { navController.popBackStack() }
+            )
+        }
     }
 }
