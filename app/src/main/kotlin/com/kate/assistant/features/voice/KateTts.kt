@@ -51,13 +51,19 @@ class KateTts(private val context: Context) {
         engine?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
 
             override fun onStart(utteranceId: String) {
-                // Signal mic-close on first utterance of any batch
+                // Signal mic-close on first utterance of any batch.
+                // NOTE: do NOT touch pendingCount here — it is incremented in
+                // speak() before the utterance is queued. Touching it in onStart
+                // (which fires once per utterance, not once per batch) would
+                // double-count and cause onSpeechIdle to never fire.
                 handler.post { onSpeechActive?.invoke() }
             }
 
             override fun onDone(utteranceId: String) {
                 val remaining = pendingCount.decrementAndGet()
                 Log.d(TAG, "TTS done — $remaining in queue")
+                // Guard against going negative (can happen if shutdown() resets
+                // the counter while a delayed onDone fires from a stale utterance).
                 if (remaining <= 0) {
                     pendingCount.set(0)
                     // 300ms buffer so room echo dies before mic opens
@@ -128,11 +134,16 @@ class KateTts(private val context: Context) {
     fun isSpeaking(): Boolean = pendingCount.get() > 0
 
     fun shutdown() {
+        // Stop the engine first so no more onDone callbacks will fire.
+        // Only then reset the counter — avoids a stale onDone decrementing
+        // past zero and triggering a spurious onSpeechIdle after restart.
         engine?.stop()
         engine?.shutdown()
         engine = null
-        ready = false
+        ready  = false
         queue.clear()
+        // Handler callbacks already in flight cannot be cancelled individually,
+        // but the engine is null so they will be no-ops at invoke time.
         pendingCount.set(0)
     }
 
