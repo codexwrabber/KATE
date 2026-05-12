@@ -1,3 +1,11 @@
+import java.util.Properties
+
+// Load keys from local.properties — never hardcoded in source
+val localProps = Properties().also { props ->
+    val f = rootProject.file("local.properties")
+    if (f.exists()) props.load(f.inputStream())
+}
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -14,9 +22,17 @@ android {
         applicationId   = "com.kate.assistant"
         minSdk          = 26
         targetSdk       = 34
-        versionCode     = 9
-        versionName     = "1.0.8"
+        versionCode     = 10
+        versionName     = "2.0.0"
         multiDexEnabled = true
+
+        // Inject API keys into BuildConfig — readable in Kotlin, never in source
+        buildConfigField("String", "DEEPGRAM_KEY_PRIMARY",
+            "\"${localProps["DEEPGRAM_KEY_PRIMARY"] ?: System.getenv("DEEPGRAM_KEY_PRIMARY") ?: ""}\"")
+        buildConfigField("String", "DEEPGRAM_KEY_FALLBACK",
+            "\"${localProps["DEEPGRAM_KEY_FALLBACK"] ?: System.getenv("DEEPGRAM_KEY_FALLBACK") ?: ""}\"")
+        buildConfigField("String", "CLAUDE_API_KEY",
+            "\"${localProps["CLAUDE_API_KEY"] ?: System.getenv("CLAUDE_API_KEY") ?: ""}\"")
 
         externalNativeBuild {
             cmake {
@@ -48,13 +64,12 @@ android {
     }
 
     buildFeatures {
-        compose = true
+        compose     = true
+        buildConfig = true      // required for BuildConfig fields above
     }
 
     packaging {
-        jniLibs {
-            useLegacyPackaging = false
-        }
+        jniLibs { useLegacyPackaging = true }
     }
 
     buildTypes {
@@ -100,5 +115,16 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.multidex:multidex:2.0.1")
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
+
+    // ── Networking (Deepgram + Claude API) ────────────────────
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
+
+    // ── Google Play Billing (subscriptions) ───────────────────
+    implementation("com.android.billingclient:billing-ktx:7.0.0")
+
+    // ── Navigation (new screens) ──────────────────────────────
+    implementation("androidx.navigation:navigation-compose:2.7.7")
 }
+
 
