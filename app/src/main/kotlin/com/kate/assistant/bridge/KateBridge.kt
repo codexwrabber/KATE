@@ -8,6 +8,7 @@ class KateBridge(private val context: Context) {
         nativeInit()
     }
 
+    // Called from C bridge via JNI when any typed event fires (INTENT, HABIT_UPDATE, etc.)
     @Suppress("unused")
     fun onNativeEvent(type: String, payload: String) {
         when (type) {
@@ -32,6 +33,14 @@ class KateBridge(private val context: Context) {
             "SUGGESTION"   -> KateEventBus.emit(KateEvent.Suggestion(payload))
             "ERROR"        -> KateEventBus.emit(KateEvent.Error(payload))
         }
+    }
+
+    // Called directly from C bridge via JNI when the VAD wake-word path fires.
+    // notify_wake_word_detected() in bridge.c looks up this exact method name.
+    // Must be kept by ProGuard — see proguard-rules.pro.
+    @Suppress("unused")
+    fun onWakeWordDetected() {
+        KateEventBus.emit(KateEvent.WakeWordDetected)
     }
 
     external fun nativeInit()
