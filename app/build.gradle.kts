@@ -26,13 +26,22 @@ android {
         versionName     = "2.0.0"
         multiDexEnabled = true
 
-        // Inject API keys into BuildConfig — readable in Kotlin, never in source
-        buildConfigField("String", "DEEPGRAM_KEY_PRIMARY",
-            "\"${localProps["DEEPGRAM_KEY_PRIMARY"] ?: System.getenv("DEEPGRAM_KEY_PRIMARY") ?: ""}\"")
-        buildConfigField("String", "DEEPGRAM_KEY_FALLBACK",
-            "\"${localProps["DEEPGRAM_KEY_FALLBACK"] ?: System.getenv("DEEPGRAM_KEY_FALLBACK") ?: ""}\"")
-        buildConfigField("String", "CLAUDE_API_KEY",
-            "\"${localProps["CLAUDE_API_KEY"] ?: System.getenv("CLAUDE_API_KEY") ?: ""}\"")
+        // Inject API keys into BuildConfig — readable in Kotlin, never in source.
+        // .trim() strips any accidental newlines GitHub Actions adds when expanding
+        // multiline secrets, which would produce "unclosed string literal" in BuildConfig.java.
+        fun key(name: String): String {
+            val raw = (localProps[name] as? String
+                ?: System.getenv(name)
+                ?: "")
+                .trim()                        // remove leading/trailing whitespace & newlines
+                .replace("\\", "\\\\")         // escape backslashes
+                .replace("\"", "\\\"")         // escape quotes
+            return "\"$raw\""
+        }
+
+        buildConfigField("String", "DEEPGRAM_KEY_PRIMARY",  key("DEEPGRAM_KEY_PRIMARY"))
+        buildConfigField("String", "DEEPGRAM_KEY_FALLBACK", key("DEEPGRAM_KEY_FALLBACK"))
+        buildConfigField("String", "CLAUDE_API_KEY",        key("CLAUDE_API_KEY"))
 
         externalNativeBuild {
             cmake {
