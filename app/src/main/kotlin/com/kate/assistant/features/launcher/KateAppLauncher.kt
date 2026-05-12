@@ -5,6 +5,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.util.Log
+import android.os.Build
+import android.provider.Settings
 
 class KateAppLauncher(private val context: Context) {
     private val pm = context.packageManager
@@ -25,8 +27,92 @@ class KateAppLauncher(private val context: Context) {
             .also { Log.d("KateLauncher", "Found ${it.size} launchable apps") }
     }
 
-    // Known apps map with alternates
+    // Known apps map with alternates (including Nigerian apps)
     private val knownApps = mapOf(
+        // ─────────────────────────────────────────────────────────
+        // NIGERIAN BANKING & PAYMENT APPS
+        // ─────────────────────────────────────────────────────────
+        "opay"           to "com.opay.wallet",
+        "o pay"          to "com.opay.wallet",
+        "opay wallet"    to "com.opay.wallet",
+        "palm pay"       to "com.palmpay",
+        "palmplay"       to "com.palmpay",
+        "palm"           to "com.palmpay",
+        "moniepoint"     to "com.moniepoint.moniepoint",
+        "monie point"    to "com.moniepoint.moniepoint",
+        "paga"           to "com.paga.android",
+        "paga app"       to "com.paga.android",
+        "gthold"         to "com.gtb.gtbank",
+        "gtbank"         to "com.gtb.gtbank", 
+        "gt bank"        to "com.gtb.gtbank",
+        "access bank"    to "com.accessbank.access",
+        "access"         to "com.accessbank.access",
+        "first bank"     to "com.firstbank.fib",
+        "firstbank"      to "com.firstbank.fib",
+        "uba"            to "com.ubagroup.ubamobile",
+        "united bank for africa" to "com.ubagroup.ubamobile",
+        "zenith bank"    to "com.zenithbank.zenithmobile",
+        "zenith"         to "com.zenithbank.zenithmobile",
+        "fidelity bank"  to "com.fidelitybank.fidelity",
+        "fidelity"       to "com.fidelitybank.fidelity",
+        "kuda"           to "com.kuda.android",
+        "kuda bank"      to "com.kuda.android",
+        "carbon"         to "com.carbon.app",
+        "carbon app"     to "com.carbon.app",
+        "fairmoney"      to "com.fairmoney.fairmoney",
+        "fair money"     to "com.fairmoney.fairmoney",
+        "palmpay"        to "com.palmpay",
+        
+        // ─────────────────────────────────────────────────────────
+        // NIGERIAN FOOD DELIVERY & SERVICES
+        // ─────────────────────────────────────────────────────────
+        "bolt food"      to "com.bolt.delivery",
+        "glovo"          to "com.glovo",
+        "chowdeck"       to "com.chowdeck.app",
+        "chow deck"      to "com.chowdeck.app",
+        
+        // ─────────────────────────────────────────────────────────
+        // NIGERIAN E-COMMERCE
+        // ─────────────────────────────────────────────────────────
+        "jumia"          to "com.jumia.android",
+        "konga"          to "com.konga.android",
+        "konga app"      to "com.konga.android",
+        
+        // ─────────────────────────────────────────────────────────
+        // NIGERIAN TRANSPORTATION
+        // ─────────────────────────────────────────────────────────
+        "lagos ride"     to "com.lagosride.app",
+        "lagos ride app" to "com.lagosride.app",
+        "gokada"         to "com.gokada",
+        "gokada app"     to "com.gokada",
+        "uru"            to "com.urumobility",
+        "uru ride"       to "com.urumobility",
+        
+        // ─────────────────────────────────────────────────────────
+        // NIGERIAN TELECOMS
+        // ─────────────────────────────────────────────────────────
+        "mtn"            to "com.mtn.ngmyaccount",
+        "mtn my account" to "com.mtn.ngmyaccount",
+        "airtel"         to "com.airtel.airtelcare",
+        "airtel care"    to "com.airtel.airtelcare",
+        "glo"            to "com.glo.gloworld",
+        "glo world"      to "com.glo.gloworld",
+        "etisalat"       to "com.etisalat.etisalatng",
+        "9mobile"        to "com.etisalat.etisalatng",
+        
+        // ─────────────────────────────────────────────────────────
+        // NIGERIAN MEDIA & NEWS
+        // ─────────────────────────────────────────────────────────
+        "pulse nigeria"  to "com.pulse.ng",
+        "pulse"          to "com.pulse.ng",
+        "guardian nigeria" to "com.guardian.ng",
+        "guardian"       to "com.guardian.ng",
+        "legit ng"       to "com.legit",
+        "legit"          to "com.legit",
+        
+        // ─────────────────────────────────────────────────────────
+        // STANDARD APPS
+        // ─────────────────────────────────────────────────────────
         "whatsapp"       to "com.whatsapp",
         "watsapp"        to "com.whatsapp",
         "what's app"     to "com.whatsapp",
@@ -95,7 +181,6 @@ class KateAppLauncher(private val context: Context) {
         "pinterest"      to "com.pinterest",
         "shazam"         to "com.shazam.android",
         "soundcloud"     to "com.soundcloud.android",
-        "twitter"        to "com.twitter.android",
         "codespaces"     to "com.github.android",
         "github"         to "com.github.android",
         "lite"           to "com.facebook.lite",
@@ -148,6 +233,115 @@ class KateAppLauncher(private val context: Context) {
         return false
     }
 
+    fun launch(packageName: String): Boolean {
+        return runCatching {
+            val intent = pm.getLaunchIntentForPackage(packageName)
+                ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (intent != null) {
+                context.startActivity(intent)
+                Log.d("KateLauncher", "Launched: $packageName")
+                true
+            } else {
+                Log.w("KateLauncher", "No launch intent: $packageName")
+                false
+            }
+        }.getOrDefault(false)
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // FORCE STOP APP - Closes an app completely
+    // ─────────────────────────────────────────────────────────
+    fun forceStopApp(appName: String): Boolean {
+        val cmd = appName.lowercase().trim()
+        Log.d("KateLauncher", "Force stop command: '$cmd'")
+        
+        // First try to find the package name
+        var targetPackage: String? = null
+        
+        // Check known apps map
+        for ((name, pkg) in knownApps) {
+            if (cmd.contains(name)) {
+                targetPackage = pkg
+                break
+            }
+        }
+        
+        // If not found, check launchable apps
+        if (targetPackage == null) {
+            val match = launchableApps.firstOrNull { (label, _) ->
+                label.contains(cmd) || cmd.contains(label)
+            }
+            targetPackage = match?.second
+        }
+        
+        // If still not found, try exact label match
+        if (targetPackage == null) {
+            val exact = launchableApps.firstOrNull { (label, _) -> label == cmd }
+            targetPackage = exact?.second
+        }
+        
+        return if (targetPackage != null) {
+            forceStopPackage(targetPackage)
+        } else {
+            Log.w("KateLauncher", "App not found for force stop: $cmd")
+            false
+        }
+    }
+    
+    private fun forceStopPackage(packageName: String): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                activityManager.killBackgroundProcesses(packageName)
+                true
+            } else {
+                @Suppress("DEPRECATION")
+                val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                activityManager.killBackgroundProcesses(packageName)
+                true
+            }
+        } catch (e: Exception) {
+            Log.e("KateLauncher", "Failed to force stop: $packageName - ${e.message}")
+            false
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // SPOTIFY PLAYBACK
+    // ─────────────────────────────────────────────────────────
+    fun playOnSpotify(songQuery: String) {
+        Log.d("KateLauncher", "Playing on Spotify: $songQuery")
+        val encodedQuery = Uri.encode(songQuery)
+        
+        // Try to search and play on Spotify
+        val searchIntent = Intent(Intent.ACTION_VIEW, Uri.parse("spotify:search:$encodedQuery"))
+        searchIntent.setPackage("com.spotify.music")
+        searchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        
+        try {
+            context.startActivity(searchIntent)
+            Log.d("KateLauncher", "Spotify search opened for: $songQuery")
+        } catch (e: Exception) {
+            // Fallback: Just open Spotify
+            val fallbackIntent = pm.getLaunchIntentForPackage("com.spotify.music")
+            if (fallbackIntent != null) {
+                context.startActivity(fallbackIntent)
+                Log.d("KateLauncher", "Spotify app opened as fallback")
+            } else {
+                Log.e("KateLauncher", "Spotify not installed")
+            }
+        }
+    }
+    
+    fun isSpotifyInstalled(): Boolean {
+        return try {
+            pm.getPackageInfo("com.spotify.music", PackageManager.GET_ACTIVITIES)
+            true
+        } catch (e: PackageManager.NameNotFoundException) {
+            false
+        }
+    }
+
     fun search(query: String, engine: SearchEngine = SearchEngine.GOOGLE) {
         if (query.isBlank()) return
         val url = when (engine) {
@@ -192,21 +386,6 @@ class KateAppLauncher(private val context: Context) {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         }
-    }
-
-    private fun launch(packageName: String): Boolean {
-        return runCatching {
-            val intent = pm.getLaunchIntentForPackage(packageName)
-                ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            if (intent != null) {
-                context.startActivity(intent)
-                Log.d("KateLauncher", "Launched: $packageName")
-                true
-            } else {
-                Log.w("KateLauncher", "No launch intent: $packageName")
-                false
-            }
-        }.getOrDefault(false)
     }
 
     private fun isInstalled(pkg: String) =
