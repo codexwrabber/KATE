@@ -55,6 +55,12 @@ class DeepgramSTT(
 
     /** Open a new streaming session. Call once per utterance or per session. */
     fun connect() {
+        if (BuildConfig.DEEPGRAM_KEY_PRIMARY.isBlank()) {
+            android.util.Log.e("DeepgramSTT",
+                "DEEPGRAM_KEY_PRIMARY is empty — key not injected by CI. " +
+                "Add it to GitHub repo secrets as DEEPGRAM_KEY_PRIMARY.")
+            return
+        }
         usingFallback = false
         openSocket(BuildConfig.DEEPGRAM_KEY_PRIMARY)
     }
