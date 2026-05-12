@@ -15,4 +15,10 @@ sealed class KateEvent {
     data class Suggestion(val entity: String)                                                    : KateEvent()
     data class AppOpened(val packageName: String)                                                : KateEvent()
     data class Error(val message: String)                                                        : KateEvent()
+    // Emitted by KateService whenever the mic starts or stops listening.
+    // HomeScreen subscribes to this to keep the pulse animation and status
+    // text accurate instead of always showing "Always listening".
+    data class MicStateChanged(val listening: Boolean)                                           : KateEvent()
+    // Emitted when connectivity changes — HomeScreen shows online/offline pill
+    data class OnlineModeChanged(val online: Boolean)                                            : KateEvent()
 }
