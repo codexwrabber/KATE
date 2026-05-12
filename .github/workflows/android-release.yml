@@ -33,28 +33,26 @@ jobs:
       - name: Clean build
         run: ./gradlew clean
 
-      - name: Download VOSK small model (offline bootstrap)
+      - name: Download Daanzu VOSK model
         run: |
-          mkdir -p app/src/main/assets/model
-          curl -L "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip" \
-            -o vosk-model.zip
-          unzip vosk-model.zip -d vosk-tmp
-          cp -r vosk-tmp/vosk-model-small-en-us-0.15/. app/src/main/assets/model/
-          rm -rf vosk-tmp vosk-model.zip
-          echo "Small model size: $(du -sh app/src/main/assets/model/ | cut -f1)"
-          echo "Model files:"
-          ls app/src/main/assets/model/
-          # Note: the daanzu-lgraph upgrade model (129MB, WER 8.2%) is downloaded
-          # at runtime by ModelManager on first launch — NOT bundled in the APK.
-          # This keeps the APK lean while still giving full offline capability
-          # from first install via the small model fallback.
-
+              mkdir -p app/src/main/assets/model
+              mkdir -p vosk-tmp
+              cd vosk-tmp
+              wget https://alphacephei.com/vosk/models/vosk-model-en-us-daanzu-20200905-lgraph.zip
+              unzip vosk-model-en-us-daanzu-20200905-lgraph.zip
+              cp -r vosk-model-en-us-daanzu-20200905-lgraph/* ../app/src/main/assets/model/
+              echo "Verifying VOSK model structure..."
+              find ../app/src/main/assets/model -maxdepth 2 -type d
+              
       - name: Build & sign release APK
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/kate.jks
           KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          DEEPGRAM_KEY_PRIMARY: ${{ secrets.DEEPGRAM_KEY_PRIMARY }}
+          DEEPGRAM_KEY_FALLBACK: ${{ secrets.DEEPGRAM_KEY_FALLBACK }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: ./gradlew assembleRelease
 
       - name: Verify packaging
