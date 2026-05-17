@@ -59,10 +59,33 @@ class KateService : Service() {
     private val scope   = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val handler = Handler(Looper.getMainLooper())
     private var initDone = false
-
-    // Tracks whether a mic restart is already in flight so the watchdog
-    // doesn't stack a second startListening() on top.
     private var micRestartPending = false
+
+    // ── WakeLock ───────────────────────────────────────────────
+    // Keeps the CPU alive while the mic is open.
+    // Without this, AudioRecord starves the moment the screen turns off,
+    // the listen thread stalls, failStreak trips AUDIO_DEAD, and Android
+    // kills the service — which was the "closes after you speak" bug.
+    // PARTIAL_WAKE_LOCK keeps CPU on without keeping screen on.
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "kate:micwakelock"
+        ).also {
+            it.setReferenceCounted(false)
+            it.acquire(24 * 60 * 60 * 1000L) // 24h max — watchdog will re-acquire daily
+        }
+        Log.d(TAG, "WakeLock acquired")
+    }
+
+    private fun releaseWakeLock() {
+        try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Exception) {}
+        wakeLock = null
+    }
 
     private val dpm by lazy {
         getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
@@ -117,6 +140,7 @@ class KateService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        acquireWakeLock()
         startForegroundNow()
         Thread {
             try {
@@ -130,6 +154,21 @@ class KateService : Service() {
                 }
             }
         }.also { it.name = "kate-init"; it.start() }
+    }
+
+    // Called when the user swipes the app away from recents.
+    // START_STICKY alone isn't enough on all OEMs — explicitly restart here.
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        val restart = Intent(applicationContext, KateService::class.java)
+        val pending = PendingIntent.getService(
+            applicationContext, 1, restart,
+            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        am.set(AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + 1000, pending)
+        Log.d(TAG, "onTaskRemoved — scheduled restart in 1s")
+    }
     }
 
     private fun initAllComponents() {
@@ -308,13 +347,14 @@ class KateService : Service() {
 
     override fun onDestroy() {
         if (chargingRegistered) try { unregisterReceiver(chargingReceiver) } catch (_: Exception) {}
-        if (::speech.isInitialized)        speech.shutdown()
-        if (::tts.isInitialized)           tts.shutdown()
-        if (::deepgram.isInitialized)      deepgram.shutdown()
-        if (::claudeAI.isInitialized)      claudeAI.shutdown()
+        if (::speech.isInitialized)         speech.shutdown()
+        if (::tts.isInitialized)            tts.shutdown()
+        if (::deepgram.isInitialized)       deepgram.shutdown()
+        if (::claudeAI.isInitialized)       claudeAI.shutdown()
         if (::networkMonitor.isInitialized) networkMonitor.stop()
-        if (::classifier.isInitialized)    classifier.close()
+        if (::classifier.isInitialized)     classifier.close()
         scope.cancel()
+        releaseWakeLock()
         super.onDestroy()
     }
 
