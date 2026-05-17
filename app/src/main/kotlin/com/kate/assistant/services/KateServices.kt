@@ -169,7 +169,6 @@ class KateService : Service() {
         am.set(AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + 1000, pending)
         Log.d(TAG, "onTaskRemoved — scheduled restart in 1s")
     }
-    }
 
     private fun initAllComponents() {
         // ── Load user name from prefs ──────────────────────────
