@@ -58,14 +58,21 @@ class KateNetworkMonitor(context: Context) {
     }
 
     fun start() {
-        // Snapshot current state
+        // Snapshot current state first
         isOnline = isCurrentlyOnline()
 
         val request = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
             .build()
         cm.registerNetworkCallback(request, callback)
         Log.d(TAG, "Monitoring started — currently ${if (isOnline) "online" else "offline"}")
+
+        // Fire the callback immediately for the current state so callers
+        // don't have to wait for a network change event to wire up online mode.
+        // This was why internet wasn't detected until flight mode toggle —
+        // the callback only fired on *changes*, never on the initial connected state.
+        if (isOnline) onOnline?.invoke() else onOffline?.invoke()
     }
 
     fun stop() {
