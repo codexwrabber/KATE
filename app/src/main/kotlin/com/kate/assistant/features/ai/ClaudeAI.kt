@@ -33,11 +33,12 @@ class ClaudeAI {
         private const val ENDPOINT = "https://api.anthropic.com/v1/messages"
         private const val VERSION  = "2023-06-01"
 
-        // Token threshold to decide which model to use
         private const val HAIKU_MAX_INPUT_WORDS = 80
 
-        private const val MODEL_HAIKU  = "claude-haiku-4-5"
-        private const val MODEL_SONNET = "claude-sonnet-4-6"
+        // Correct Anthropic API model strings as of 2026
+        // Using the versioned names to avoid "model not found" 404s
+        private const val MODEL_HAIKU  = "claude-haiku-4-5-20251001"
+        private const val MODEL_SONNET = "claude-sonnet-4-5"
 
         // Kate's system prompt — defines her personality
         private fun systemPrompt(userName: String) = """
@@ -108,7 +109,11 @@ class ClaudeAI {
             val responseBody = response.body?.string() ?: return@withContext null
 
             if (!response.isSuccessful) {
-                Log.e(TAG, "API error ${response.code}: $responseBody")
+                Log.e(TAG, "API ${response.code} using $model: $responseBody")
+                // Common failures:
+                // 404 = wrong model name
+                // 401 = bad API key
+                // 529 = overloaded
                 return@withContext null
             }
 
