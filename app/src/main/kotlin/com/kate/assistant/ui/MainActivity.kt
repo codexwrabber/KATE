@@ -95,6 +95,37 @@ class MainActivity : ComponentActivity() {
                 } catch (_: Exception) {}
             }
         }
+
+        // ── Transsion / TECNO / Infinix / itel OEM protection ─────────────────
+        // These devices (confirmed by bugreport: BG6m TECNO) use PhoneManager
+        // and a proprietary AutoStart manager that kills background services
+        // regardless of standard battery exemption. We must request whitelisting
+        // through their specific intents. These are no-ops on other OEMs.
+        val transsionIntents = listOf(
+            // Transsion AutoStart manager (TECNO, Infinix, itel)
+            Intent().apply {
+                component = android.content.ComponentName(
+                    "com.transsion.phonemaster",
+                    "com.transsion.phonemaster.ui.autostart.AutoStartActivity"
+                )
+            },
+            // Transsion PhoneManager battery settings
+            Intent().apply {
+                component = android.content.ComponentName(
+                    "com.transsion.phonemaster",
+                    "com.transsion.phonemaster.ui.BatteryActivity"
+                )
+            }
+        )
+        for (intent in transsionIntents) {
+            try {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (packageManager.resolveActivity(intent, 0) != null) {
+                    startActivity(intent)
+                    break // only need to open one
+                }
+            } catch (_: Exception) {}
+        }
     }
 
     private fun checkAccessibility() {
