@@ -38,7 +38,7 @@ jobs:
               mkdir -p app/src/main/assets/model
               mkdir -p vosk-tmp
               cd vosk-tmp
-              wget https://alphacephei.com/vosk/models/vosk-model-en-us-daanzu-20200905-lgraph.zip
+              wget --no-check-certificate https://alphacephei.com/vosk/models/vosk-model-en-us-daanzu-20200905-lgraph.zip
               unzip vosk-model-en-us-daanzu-20200905-lgraph.zip
               cp -r vosk-model-en-us-daanzu-20200905-lgraph/* ../app/src/main/assets/model/
               echo "Verifying VOSK model structure..."
