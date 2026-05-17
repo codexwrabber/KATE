@@ -244,7 +244,13 @@ class KateService : Service() {
         speech = KateSpeechManager(
             context   = this,
             modelPath = modelPath,
-            onResult  = { text -> handler.post { handleSpeech(text) } },
+            onResult  = { text ->
+                // When online, Deepgram is the primary STT — suppress VOSK results
+                // to avoid the same utterance being processed twice (once by each engine).
+                // VOSK still runs for AudioRecord continuity and offline fallback.
+                if (!onlineMode) handler.post { handleSpeech(text) }
+                else Log.v(TAG, "VOSK result suppressed (online): \"$text\"")
+            },
             onError   = { err ->
                 when (err) {
                     "AUDIO_DEAD" -> {
